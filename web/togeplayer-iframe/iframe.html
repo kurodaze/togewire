@@ -1,0 +1,89 @@
+<!-- TOGEWIRE Player Iframe -->
+<div id="togewire-iframe" style="text-align: center; margin-top: 15px; opacity: 0; transition: opacity 1s ease-in-out;">
+    <!-- Player will be loaded here dynamically -->
+</div>
+
+<style>
+.togewire-fade-in {
+    opacity: 0;
+    animation: fadeIn 0.5s ease-in-out forwards;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+</style>
+
+<script>
+(function() {
+    const serverUrl = 'https://togewire.domain.tld'; // Replace with your server URL
+    const iframe = document.getElementById('togewire-iframe');
+    let checkInterval;
+    let isLoaded = false;
+    
+    async function pingServer() {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            
+            const response = await fetch(`${serverUrl}/ping?t=${Date.now()}`, {
+                method: 'GET',
+                signal: controller.signal,
+                cache: 'no-cache',
+                headers: { 'Accept': 'application/json' }
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (response.ok && response.status === 200) {
+                const data = await response.json();
+                return true;
+            }
+            return false;
+        } catch (error) {
+            return false;
+        }
+    }
+    
+    async function checkAndLoadPlayer() {
+        const serverOnline = await pingServer();
+        
+        if (serverOnline && !isLoaded) {
+            // Server is online, load the iframe
+            const iframeElement = document.createElement('iframe');
+            iframeElement.src = `${serverUrl}/player`;
+            iframeElement.style.cssText = 'border:0; background:transparent; width:100%; max-width:600px; height:90px; overflow:hidden;';
+            iframeElement.scrolling = 'no';
+            iframeElement.className = 'togewire-fade-in';
+            
+            iframe.innerHTML = '';
+            iframe.appendChild(iframeElement);
+            isLoaded = true;
+        } else if (!serverOnline && isLoaded) {
+            // Server went offline, hide the player
+            iframe.style.transition = 'opacity 0.3s ease-out';
+            iframe.style.opacity = '0';
+            setTimeout(() => {
+                iframe.innerHTML = '';
+                iframe.style.opacity = '';
+                iframe.style.transition = '';
+            }, 300);
+            isLoaded = false;
+        } else if (!serverOnline) {
+            // Server is offline, keep iframe empty
+            iframe.innerHTML = '';
+        }
+    }
+    
+    // Initial check and periodic monitoring
+    checkAndLoadPlayer();
+    checkInterval = setInterval(checkAndLoadPlayer, 6000);
+    
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => {
+        if (checkInterval) clearInterval(checkInterval);
+    });
+})();
+</script>
+<!-- END TOGEWIRE Player Iframe -->

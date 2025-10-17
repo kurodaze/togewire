@@ -1,0 +1,10 @@
+{
+  "port": 7093,
+  "host": "0.0.0.0",
+  "log_level": "info",
+  "spotify_client_id": "",
+  "spotify_client_secret": "",
+  "spotify_redirect_uri": "http://localhost:7093/callback",
+  "cache_max_size_mb": 1024,
+  "session_secret": ""
+}

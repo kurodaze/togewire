@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TOGEWIRE Player</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: sans-serif;
+            background: transparent;
+            font-size: 14px;
+            width: 100%;
+            color: #ccc;
+            padding: 8px 12px;
+            box-sizing: border-box;
+            min-height: 40px;
+        }
+        body.iframe-mode {
+            min-height: 0;
+            height: 0;
+            overflow: hidden;
+        }
+        body.iframe-mode .togewire-player {
+            display: none !important;
+        }
+        .togewire-player {
+            display: flex; 
+            align-items: center; 
+            position: relative; 
+            padding: 4px 0;
+            width: 100%;
+            box-sizing: border-box;
+            justify-content: center;
+        }
+        .now-playing { 
+            white-space: nowrap; 
+            flex-shrink: 1;
+            padding: 2px 0;
+        }
+        .tooltip {
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: -50px;
+            color: #fff;
+            padding: 6px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+            line-height: 1.6;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s, visibility 0.2s;
+            pointer-events: none;
+            text-align: center;
+            white-space: pre-line;
+        }
+        .togewire-player:hover .tooltip {
+            opacity: 1;
+            visibility: visible;
+        }
+        .listen-btn { 
+            background: inherit; 
+            color: inherit; 
+            border: none; 
+            cursor: pointer; 
+            font-family: inherit; 
+            font-size: 12px;
+            white-space: nowrap;
+            flex-shrink: 0;
+            min-width: 40px;
+            text-align: center;
+        }
+        #audio { display: none; }
+    </style>
+</head>
+<body>
+    <div class="togewire-player" id="player" style="display: none;">
+        <span class="now-playing" id="nowPlaying">Connecting...</span>
+        <button class="listen-btn" id="listenBtn">join</button>
+        <div class="tooltip" id="tooltip"></div>
+        <audio id="audio" preload="auto"></audio>
+    </div>
+
+    <script>
+        // Global state
+        let isListening = false;
+        let socket = null;
+        let currentTrackData = null;
+        let loadedTrackId = null;
+        let requestingTrackId = null; // Track currently being requested/loaded
+        
+        // Timers
+        let syncTimer = null;
+        let pauseTimer = null;
+        let progressTimer = null;
+        let lastSyncTime = 0; // Prevent sync loop
+        
+        // Latency tracking
+        let syncRequestTime = 0;
+        let latencyHistory = [];
+        let averageLatency = 0;
+        
+        // Audio streaming state
+        let audioBuffer = [];
+        let audioBlob = null;
+        let audioObjectUrl = null;
+        let isReceivingAudio = false;
+        let hasShownPlayer = false;
+        let audioRetryCount = 0;
+
+        const player = document.getElementById('player');
+        const nowPlaying = document.getElementById('nowPlaying');
+        const listenBtn = document.getElementById('listenBtn');
+        const tooltip = document.getElementById('tooltip');
+        const audio = document.getElementById('audio');
+
+        function formatTime(ms) {
+            const seconds = Math.floor(ms / 1000);
+            const mins = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        function truncateText(text, maxLength = 22) {
+            if (!text || text.length <= maxLength) return text;
+            return text.substring(0, maxLength - 2) + '...';
+        }
+
+        function updateTooltip() {
+            if (!currentTrackData?.track) {
+                tooltip.textContent = '';
+                return;
+            }
+            
+            const track = currentTrackData.track;
+            let progress = currentTrackData.progress || 0;
+            const duration = currentTrackData.duration || 0;
+            
+            // If playing and timestamp available, calculate current progress
+            if (currentTrackData.isPlaying && currentTrackData.lastProgressUpdate) {
+                const timeSinceUpdate = Date.now() - currentTrackData.lastProgressUpdate;
+                progress = (currentTrackData.progress || 0) + timeSinceUpdate;
+                
+                // Clamp to duration
+                if (duration > 0 && progress > duration) {
+                    progress = duration;
+                }
+            }
+            
+            let text = `${track.name} - ${track.artist}`;
+            
+            if (!currentTrackData.audio_ready) {
+                text += ' (Loading audio...)';
+            } else if (!currentTrackData.isPlaying) {
+                text += ' (Paused)';
+            } else if (duration > 0) {
+                text += ` (${formatTime(progress)} / ${formatTime(duration)})`;
+            }
+            
+            // Add listener count on new line (only if user is listening)
+            if (isListening && currentTrackData.listener_count !== undefined && currentTrackData.listener_count > 0) {
+                if (currentTrackData.listener_count === 1) {
+                    text += '\nlistening along with 1 other';
+                } else {
+                    text += `\nlistening along with ${currentTrackData.listener_count} others`;
+                }
+            }
+            
+            tooltip.textContent = text;
+        }
+
+        function hidePlayer() {
+            if (window.self !== window.top) {
+                document.body.classList.add('iframe-mode');
+                player.style.display = 'none';
+            } else {
+                player.style.display = 'none';
+            }
+            if (isListening) stopListen();
+        }
+
+        function updateDisplay(data) {
+            if (!data?.track || (!data.isPlaying && !data.audio_ready)) {
+                // Clear timers
+                if (pauseTimer) {
+                    clearTimeout(pauseTimer);
+                    pauseTimer = null;
+                }
+                if (progressTimer) {
+                    clearInterval(progressTimer);
+                    progressTimer = null;
+                }
+                
+                hidePlayer();
+                return;
+            }
+
+            // Don't show player on first visit if music is paused
+            if (!hasShownPlayer && !data.isPlaying) {
+                return;
+            }
+
+            // Show player
+            if (window.self !== window.top) {
+                document.body.classList.remove('iframe-mode');
+            }
+            
+            // Handle track changes BEFORE updating currentTrackData
+            const track = data.track;
+            if (data.track_changed) {
+                const oldTrack = currentTrackData?.track ? `${currentTrackData.track.artist} - ${currentTrackData.track.name}` : 'unknown';
+                const newTrack = `${track.artist} - ${track.name}`;
+                console.log(`🔄 Track changed: ${oldTrack} → ${newTrack}`);
+                console.log(`🧹 Cleaning up: ${oldTrack}`);
+                // Pause first to stop any playing audio immediately
+                audio.pause();
+                audio.currentTime = 0;
+                // Then cleanup everything (which also clears src and loads)
+                cleanupAudioStream();
+                
+                // Show loading state
+                if (isListening) {
+                    nowPlaying.textContent = `Loading ${truncateText(track.artist)}...`;
+                }
+            }
+            
+            currentTrackData = data;
+            hasShownPlayer = true;
+            
+            // Add timestamp for progress calculation
+            if (data.progress !== undefined) {
+                currentTrackData.lastProgressUpdate = Date.now();
+            }
+            
+            player.style.display = 'flex';
+            listenBtn.style.display = 'inline';
+
+            // Handle timers based on play state
+            if (!data.isPlaying) {
+                // Paused: stop progress timer, start pause timer
+                if (progressTimer) {
+                    clearInterval(progressTimer);
+                    progressTimer = null;
+                }
+                
+                if (!pauseTimer) {
+                    pauseTimer = setTimeout(hidePlayer, 60000); // 60 seconds
+                }
+            } else {
+                // Playing: clear pause timer, start progress timer if not listening
+                if (pauseTimer) {
+                    clearTimeout(pauseTimer);
+                    pauseTimer = null;
+                }
+                
+                if (!progressTimer && !isListening) {
+                    progressTimer = setInterval(updateTooltip, 1000);
+                }
+            }
+
+            const truncatedArtist = truncateText(track.artist);
+            if (!data.track_changed || !isListening) {
+                nowPlaying.textContent = `Listening to ${truncatedArtist}`;
+            }
+            
+            // Load audio when listening and track ID changed
+            // Request even if audio_ready is false - server will stream when available
+            if (isListening && loadedTrackId !== data.track?.id) {
+                loadAudioSource();
+            }
+
+            // Update listen button state
+            if (isListening) {
+                listenBtn.textContent = 'leave';
+            } else if (data.audio_ready) {
+                listenBtn.textContent = 'join';
+            }
+            
+            updateTooltip();
+        }
+
+        function loadAudioSource() {
+            const currentTrackId = currentTrackData?.track?.id;
+            
+            // Don't reload if correct track already loaded
+            if (currentTrackId && loadedTrackId === currentTrackId && audioObjectUrl) {
+                console.log('🎵 Audio already loaded for current track, skipping request');
+                return;
+            }
+            
+            // Don't request if already requesting this track
+            if (currentTrackId && requestingTrackId === currentTrackId) {
+                console.log('🎵 Already requesting this track, skipping duplicate request');
+                return;
+            }
+            
+            // Request WebSocket audio streaming IMMEDIATELY, even if not ready
+            // The server will stream it as soon as it becomes available
+            if (socket && socket.readyState === WebSocket.OPEN && currentTrackId && isListening) {
+                const trackName = currentTrackData?.track ? `${currentTrackData.track.artist} - ${currentTrackData.track.name}` : currentTrackId;
+                console.log(`🎵 Requesting audio: ${trackName}`);
+                requestingTrackId = currentTrackId;
+                socket.send(JSON.stringify({
+                    type: 'request_audio_stream',
+                    track_id: currentTrackId
+                }));
+            }
+        }
+        
+        function cleanupAudioStream() {
+            // Clean up previous audio stream
+            if (audioObjectUrl) {
+                URL.revokeObjectURL(audioObjectUrl);
+                audioObjectUrl = null;
+            }
+            audioBlob = null;
+            isReceivingAudio = false;
+            loadedTrackId = null;
+            requestingTrackId = null;
+            
+            if (audio) {
+                audio.removeAttribute('src');
+                audio.load();
+            }
+        }
+        
+        function handleAudioStreamStart(data) {
+            const streamStartTime = performance.now();
+            const trackName = currentTrackData?.track ? `${currentTrackData.track.artist} - ${currentTrackData.track.name}` : data.track_id;
+            console.log(`⬇️ Receiving ${trackName} (${Math.round(data.content_length / 1024)}KB)`);
+            // track change already cleaned up, keep state for validation
+            isReceivingAudio = true;
+            audioBuffer = [];
+            requestingTrackId = data.track_id; // Update to match streaming track
+            nowPlaying.textContent = `Loading audio... (${Math.round(data.content_length / 1024)}KB)`;
+            window.audioStreamStartTime = streamStartTime; // Store for timing
+        }
+        
+        function handleAudioChunk(data) {
+            if (!isReceivingAudio) return;
+            
+            try {
+                if (!data.data || data.data.length === 0) {
+                    console.error('⚠️ Received empty chunk');
+                    return;
+                }
+                const binaryString = atob(data.data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                audioBuffer.push(bytes);
+            } catch (e) {
+                console.error('❌ Error processing audio chunk:', e);
+                // Mark stream as corrupted
+                isReceivingAudio = false;
+                audioBuffer = [];
+            }
+        }
+        
+        function handleAudioStreamEnd(data) {
+            const streamEndTime = performance.now();
+            const streamDuration = window.audioStreamStartTime ? (streamEndTime - window.audioStreamStartTime).toFixed(0) : 'unknown';
+            isReceivingAudio = false;
+            
+            // Check if this audio is still relevant (user might have skipped to a different track)
+            const expectedTrackId = data.track_id || requestingTrackId;
+            const currentTrackId = currentTrackData?.track?.id;
+            
+            if (expectedTrackId && currentTrackId && expectedTrackId !== currentTrackId) {
+                console.log('🔄 Discarding stale audio (server should prevent this)');
+                // Buffer will be reset on next stream start
+                return;
+            }
+            
+            try {
+                // Validate chunks are received
+                if (audioBuffer.length === 0) {
+                    console.error('⚠️ No audio chunks received!');
+                    return;
+                }
+                
+                // Combine chunks into blob
+                const totalLength = audioBuffer.reduce((sum, chunk) => sum + chunk.length, 0);
+                console.log(`🔧 Assembling ${audioBuffer.length} chunks (${totalLength} bytes)`);
+                const combined = new Uint8Array(totalLength);
+                let offset = 0;
+                
+                for (const chunk of audioBuffer) {
+                    combined.set(chunk, offset);
+                    offset += chunk.length;
+                }
+                
+                // Create audio source
+                audioBlob = new Blob([combined], { type: 'audio/ogg; codecs=opus' });
+                audioObjectUrl = URL.createObjectURL(audioBlob);
+                console.log(`🎵 Created blob: ${audioObjectUrl}`);
+                
+                audio.src = audioObjectUrl;
+                loadedTrackId = currentTrackData?.track?.id;
+                
+                // Clear any existing event listeners to prevent duplicates
+                audio.oncanplay = null;
+                audio.onerror = null;
+                
+                // Use 'canplay' instead of 'canplaythrough' for faster start
+                let canplayFired = false;
+                audio.oncanplay = () => {
+                    if (canplayFired) return; // Prevent multiple fires
+                    canplayFired = true;
+                    
+                    const loadEndTime = performance.now();
+                    const totalTime = window.audioStreamStartTime ? (loadEndTime - window.audioStreamStartTime).toFixed(0) : 'unknown';
+                    console.log(`✅ Ready to play (${totalTime}ms)`);
+                    audioRetryCount = 0; // Reset retry counter on success
+                    if (currentTrackData?.progress && isListening) {
+                        const spotifyProgress = formatTime(currentTrackData.progress);
+                        console.log(`🌀 Initial sync to ${spotifyProgress} (Spotify)`);
+                        audio.currentTime = currentTrackData.progress / 1000;
+                    }
+                    const track = currentTrackData.track;
+                    nowPlaying.textContent = `Listening to ${truncateText(track.artist)}`;
+                    
+                    // Auto-play if we're listening and Spotify is playing
+                    if (isListening && currentTrackData?.isPlaying && audio.paused) {
+                        audio.play().catch(e => console.log('Auto-play prevented:', e));
+                    }
+                };
+                
+                // Add error handler for decode failures (without once:true)
+                audio.onerror = (e) => {
+                    console.error('❌ Audio decode error:', e, audio.error);
+                    console.log(`🔍 Blob size: ${audioBlob?.size}, chunks: ${audioBuffer.length}`);
+                    
+                    // Auto-retry once
+                    if (audioRetryCount < 1) {
+                        audioRetryCount++;
+                        console.log(`🔄 Retrying audio request (attempt ${audioRetryCount + 1}/2)...`);
+                        nowPlaying.textContent = 'Retrying...';
+                        cleanupAudioStream();
+                        setTimeout(() => loadAudioSource(), 1000);
+                    } else {
+                        console.error('❌ Retry failed, giving up');
+                        nowPlaying.textContent = 'Audio failed - refresh page';
+                        audioRetryCount = 0;
+                    }
+                };
+                
+                // Force immediate load without waiting
+                audio.load();
+            } catch (e) {
+                console.error('Error finalizing audio stream:', e);
+                nowPlaying.textContent = 'Audio loading failed';
+            }
+        }
+        
+        function requestSync() {
+            if (!isListening || !audio || !socket) return;
+            
+            const audioTime = audio.currentTime;
+            
+            // Audio not ready yet
+            if (audio.readyState < 2) return;
+            
+            // Don't sync if audio hasn't started playing yet
+            if (audioTime === 0 && currentTrackData?.progress > 5000) {
+                return;
+            }
+            
+            // Record request time for latency measurement
+            syncRequestTime = performance.now();
+            
+            // Request sync via WebSocket with timestamp
+            socket.send(JSON.stringify({
+                type: 'sync_request',
+                audio_time: audioTime,
+                client_timestamp: Date.now()
+            }));
+        }
+        
+        function handleSyncResponse(data) {
+            if (!isListening || !audio) return;
+            
+            try {
+                // Calculate total latency including Spotify API delay
+                // Server timestamp = when Spotify data was fetched
+                // Current time - server timestamp = total delay (network + Spotify API)
+                if (data.timestamp && syncRequestTime > 0) {
+                    const now = Date.now();
+                    const totalLatency = Math.abs(now - data.timestamp);
+                    latencyHistory.push(totalLatency);
+                    // Keep last 10 measurements
+                    if (latencyHistory.length > 10) latencyHistory.shift();
+                    // Calculate average
+                    averageLatency = latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length;
+                    syncRequestTime = 0;
+                }
+                
+                // Don't sync if track ID doesn't match loaded audio
+                const currentTrackId = currentTrackData?.track?.id;
+                if (loadedTrackId && currentTrackId && loadedTrackId !== currentTrackId) {
+                    // Track changed, waiting for new audio
+                    return;
+                }
+                
+                // Verify sync response is for the correct track
+                if (data.track_id && loadedTrackId && data.track_id !== loadedTrackId) {
+                    console.log('⚠️ Ignoring sync for wrong track');
+                    return;
+                }
+                
+                // Don't sync if audio isn't properly loaded yet
+                // readyState 4 = HAVE_ENOUGH_DATA (fully loaded and can play)
+                if (audio.readyState < 4) {
+                    // Only handle play/pause for partially loaded audio
+                    if (data.is_playing && audio.paused && audio.readyState >= 2) {
+                        audio.play().catch(() => {});
+                    } else if (!data.is_playing && !audio.paused) {
+                        audio.pause();
+                    }
+                    return;
+                }
+                
+                const audioTime = audio.currentTime;
+                const spotifyTime = data.progress / 1000;
+                const diff = Math.abs(spotifyTime - audioTime);
+                
+                // Update track progress for tooltip
+                if (currentTrackData) {
+                    currentTrackData.progress = data.progress;
+                    currentTrackData.isPlaying = data.is_playing;
+                    currentTrackData.lastProgressUpdate = Date.now();
+                    updateTooltip();
+                }
+                
+                // Don't sync if audio hasn't actually started playing yet (still at 0)
+                // This prevents sync loop when audio loads but hasn't started
+                if (audioTime === 0 && !audio.paused) {
+                    return;
+                }
+                
+                // Don't sync if Spotify is near start (< 3s) - likely a track change
+                // This prevents trying to sync the old track to position 0:00
+                if (spotifyTime < 3) {
+                    return;
+                }
+                
+                // Adaptive drift threshold based on measured latency
+                // Base threshold is 5 seconds, add latency buffer (latency * 4 to account for variance)
+                const latencyBuffer = (averageLatency / 1000) * 4; // Convert to seconds and multiply by 4
+                const driftThreshold = 5.0 + Math.max(0, latencyBuffer);
+                const shouldSync = diff > driftThreshold;
+                
+                // Don't sync near start (first 2 seconds) or end (last 5 seconds) to avoid jarring behavior
+                const duration = audio.duration || 0;
+                const nearStart = audioTime < 2;
+                const nearEnd = duration > 0 && audioTime > (duration - 5);
+                
+                if (shouldSync && !nearStart && !nearEnd) {
+                    const audioProgress = formatTime(audioTime * 1000);
+                    const spotifyProgress = formatTime(data.progress);
+                    console.log(`🌀 Spotify sync: audio ${audioProgress} -> Spotify ${spotifyProgress} (drift: ${diff.toFixed(1)}s, threshold: ${driftThreshold.toFixed(1)}s, latency: ${averageLatency.toFixed(0)}ms)`);
+                    
+                    // Record sync time to prevent immediate re-sync
+                    lastSyncTime = Date.now();
+                    
+                    // Seek directly without pausing for smoother transition
+                    audio.currentTime = spotifyTime;
+                    
+                    // Ensure playing state matches
+                    if (data.is_playing && audio.paused) {
+                        audio.play().catch(() => {});
+                    } else if (!data.is_playing && !audio.paused) {
+                        audio.pause();
+                    }
+                } else {
+                    // Handle play/pause state without seeking
+                    if (data.is_playing && audio.paused) {
+                        audio.play().catch(() => {});
+                    } else if (!data.is_playing && !audio.paused) {
+                        audio.pause();
+                    }
+                }
+                
+            } catch (e) {
+                console.warn('Sync error:', e);
+            }
+        }
+
+        async function toggleListen() {
+            if (isListening) {
+                await stopListen();
+            } else {
+                await startListen();
+            }
+        }
+
+        async function startListen() {
+            try {
+                isListening = true;
+                listenBtn.textContent = 'leave';
+                
+                // Stop progress timer since sync will handle tooltip updates
+                if (progressTimer) {
+                    clearInterval(progressTimer);
+                    progressTimer = null;
+                }
+                
+                if (syncTimer) clearInterval(syncTimer);
+                
+                loadAudioSource();
+                
+                // WebSocket-based sync
+                syncTimer = setInterval(requestSync, 500);
+                
+            } catch (e) {
+                console.error('Error starting listen:', e);
+            }
+        }
+
+        async function stopListen() {
+            isListening = false;
+            listenBtn.textContent = 'join';
+            
+            if (audio) audio.pause();
+            if (syncTimer) clearInterval(syncTimer);
+            
+            // Clean up WebSocket audio stream
+            cleanupAudioStream();
+            
+            // Tell server listener stopped listening
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'stop_listening' }));
+            }
+            
+            // Update tooltip to remove listener count
+            updateTooltip();
+            
+            // Restart progress timer for tooltip updates when not listening
+            if (currentTrackData?.isPlaying && !progressTimer) {
+                progressTimer = setInterval(updateTooltip, 1000);
+            }
+        }
+
+        function connectWebSocket() {
+            try {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+                
+                socket.onopen = () => {
+                    console.log('🔌 WebSocket connected');
+                };
+                
+                socket.onclose = (event) => {
+                    console.log('🔌 WebSocket disconnected:', event.code, event.reason);
+                    hidePlayer();
+                    if (isListening) stopListen();
+                };
+                
+                socket.onmessage = (event) => {
+                    const message = JSON.parse(event.data);
+                    
+                    switch (message.type) {
+                        case 'track_update':
+                            updateDisplay(message.data);
+                            break;
+                        case 'sync_response':
+                            handleSyncResponse(message.data);
+                            break;
+                        case 'audio_stream_start':
+                            handleAudioStreamStart(message.data);
+                            break;
+                        case 'audio_chunk':
+                            handleAudioChunk(message.data);
+                            break;
+                        case 'audio_stream_end':
+                            handleAudioStreamEnd(message.data);
+                            break;
+                        case 'audio_stream_error':
+                            console.error('🎵 WebSocket audio stream error:', message.data.error);
+                            nowPlaying.textContent = 'Audio failed to load';
+                            break;
+                        case 'audio_stream_response':
+                            if (message.data.error) {
+                                // Clear requesting flag
+                                requestingTrackId = null;
+                                console.log('⏳ Audio not ready yet, waiting for server...');
+                                // Don't retry - server will broadcast when ready
+                            }
+                            break;
+                        default:
+                            console.log('Unknown WebSocket message:', message);
+                    }
+                };
+                
+                socket.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    hidePlayer();
+                };
+                
+            } catch (e) {
+                console.error('WebSocket setup error:', e);
+                hidePlayer();
+            }
+        }
+
+        // Event listeners
+        listenBtn.addEventListener('click', toggleListen);
+
+        // Initialize
+        // Detect iframe mode and hide body until connection is established
+        if (window.self !== window.top) {
+            document.body.classList.add('iframe-mode');
+        }
+        connectWebSocket();
+    </script>
+</body>
+</html>
