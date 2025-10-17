@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 
@@ -65,7 +66,9 @@ func (c *Config) load() {
 
 	// Override with environment variables
 	if port := os.Getenv("PORT"); port != "" {
-		fmt.Sscanf(port, "%d", &c.Port)
+		if _, err := fmt.Sscanf(port, "%d", &c.Port); err != nil {
+			log.Printf("invalid PORT value %q: %v", port, err)
+		}
 	}
 	if host := os.Getenv("HOST"); host != "" {
 		c.Host = host
@@ -80,7 +83,9 @@ func (c *Config) load() {
 	// Generate session secret if not exists
 	if c.SessionSecret == "" {
 		c.SessionSecret = generateRandomSecret()
-		c.Save()
+		if err := c.Save(); err != nil {
+			log.Printf("failed to save config: %v", err)
+		}
 	}
 }
 
@@ -95,9 +100,15 @@ func (c *Config) Save() error {
 	}
 
 	// Ensure configs directory exists
-	os.MkdirAll("configs", 0755)
+	if err := os.MkdirAll("configs", 0755); err != nil {
+		return err
+	}
 
-	return os.WriteFile("configs/config.json", data, 0600)
+	if err := os.WriteFile("configs/config.json", data, 0600); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // IsAuthenticated checks if Spotify is configured and authenticated

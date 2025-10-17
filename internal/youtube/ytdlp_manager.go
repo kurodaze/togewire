@@ -34,7 +34,9 @@ type YtdlpManager struct {
 func GetYtdlpManager() *YtdlpManager {
 	ytdlpManagerOnce.Do(func() {
 		binDir := filepath.Join(".", "bin")
-		os.MkdirAll(binDir, 0755)
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			log.Printf("Failed to create bin directory: %v", err)
+		}
 
 		ytdlpManager = &YtdlpManager{
 			binDir:  binDir,
@@ -204,7 +206,9 @@ func (m *YtdlpManager) shouldUpdate() bool {
 // markUpdated marks the current time as last update check
 func (m *YtdlpManager) markUpdated() {
 	checkFile := filepath.Join(m.binDir, updateCheckFile)
-	os.WriteFile(checkFile, []byte(time.Now().Format(time.RFC3339)), 0644)
+	if err := os.WriteFile(checkFile, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
+		log.Printf("Failed to write ytdlp update check file: %v", err)
+	}
 	m.lastUpdate = time.Now()
 }
 
