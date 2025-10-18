@@ -51,17 +51,17 @@ For secure and easy external access, you may use Cloudflare Tunnel to expose you
    - Authenticate with Spotify
 
 ### Configuration
-- All configuration settings are stored in `.configs/config.json` (auto-generated on first run)
+- All configuration settings are stored in `configs/config.json` (auto-generated on first run)
 - An example configuration is available in `configs/config.example.json`
 - To update your configuration, delete the `config.json` file and restart the server to generate a new one.
 
 ### Usage
 
-Visit `/player` to see the current track and click "join" to listen along
+Visit `togewire.domain.tld/player` to see the current track and click "join" to listen along
 
 ### Embedding the Player
 
-to embed the player in your website, see the iframe code at `./web/togeplayer-iframe/iframe.html`.
+to embed the player in your website, see the iframe code at `web/togeplayer-iframe/iframe.html`.
 
 ## Architecture and features
 
