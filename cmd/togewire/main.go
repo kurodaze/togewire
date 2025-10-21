@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/kurodaze/togewire"
 	"github.com/kurodaze/togewire/internal/config"
 	"github.com/kurodaze/togewire/internal/server"
 )
@@ -47,6 +48,9 @@ func main() {
 		log.Println("   This token is required to set your admin password.")
 		log.Println("")
 	}
+
+	// Set embedded files for the server
+	server.SetEmbeddedFiles(togewire.EmbeddedFiles)
 
 	// Create and configure server
 	srv := server.New()

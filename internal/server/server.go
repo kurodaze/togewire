@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"html/template"
+	"io/fs"
 	"log"
 	"net/http"
 	"sync"
@@ -124,9 +126,25 @@ func (s *Server) setupRouter() {
 	// Security middleware
 	s.router.Use(s.securityHeaders())
 
-	// Static files
-	s.router.Static("/static", "./web/static")
-	s.router.LoadHTMLGlob("web/templates/*")
+	// Load templates from embedded files or filesystem
+	if EmbeddedFiles != nil && EmbeddedFiles.IsSet {
+		// Use embedded files
+		templ := template.Must(template.New("").ParseFS(EmbeddedFiles.FS, "web/templates/*"))
+		s.router.SetHTMLTemplate(templ)
+
+		// Serve static files from embedded FS
+		staticFS, _ := fs.Sub(EmbeddedFiles.FS, "web/static")
+		s.router.StaticFS("/static", http.FS(staticFS))
+
+		// Serve JS files for player
+		jsFS, _ := fs.Sub(EmbeddedFiles.FS, "web/static/js")
+		s.router.StaticFS("/player/js", http.FS(jsFS))
+	} else {
+		// Fallback to filesystem (for development)
+		s.router.Static("/static", "./web/static")
+		s.router.LoadHTMLGlob("web/templates/*")
+		s.router.Static("/player/js", "./web/static/js")
+	}
 
 	// Main routes (protected)
 	s.router.GET("/", requireAuth(), s.handleIndex)
@@ -136,7 +154,6 @@ func (s *Server) setupRouter() {
 
 	// Player endpoints (public)
 	s.router.GET("/player", s.servePlayer)
-	s.router.Static("/player/js", "./web/static/js")
 
 	// Health check
 	s.router.GET("/ping", s.handlePing)
