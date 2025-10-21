@@ -53,6 +53,9 @@ func GetYtdlpManager() *YtdlpManager {
 
 // getYtdlpBinaryName returns the binary name
 func getYtdlpBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "yt-dlp.exe"
+	}
 	return "yt-dlp"
 }
 
@@ -212,14 +215,24 @@ func (m *YtdlpManager) markUpdated() {
 	m.lastUpdate = time.Now()
 }
 
-// getBinaryURL returns the download URL for Linux
+// getBinaryURL returns the download URL based on OS and architecture
 func (m *YtdlpManager) getBinaryURL() string {
-	// ARM64 requires Python-based version
-	if runtime.GOARCH == "arm64" || runtime.GOARCH == "arm" {
+	switch runtime.GOOS {
+	case "windows":
+		return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+	case "darwin":
+		return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+	case "linux":
+		// ARM64 requires Python-based version
+		if runtime.GOARCH == "arm64" || runtime.GOARCH == "arm" {
+			return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+		}
+		// AMD64/x86_64 uses standalone binary (no Python needed)
+		return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+	default:
+		// Fallback to generic Python-based version
 		return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
 	}
-	// AMD64/x86_64 uses standalone binary (no Python needed)
-	return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
 }
 
 // fileExists checks if a file exists
