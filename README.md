@@ -32,6 +32,12 @@ For secure and easy external access, you may use Cloudflare Tunnel to expose you
    # Ubuntu/Debian
    sudo apt update
    sudo apt install ffmpeg
+   
+   # Windows (using winget)
+   winget install ffmpeg
+   
+   # macOS
+   brew install ffmpeg
    ```
 
 2. **Build and Run**
