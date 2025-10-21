@@ -11,8 +11,8 @@ Share your Spotify listening session with anyone via your own website.
 - **CPU**: 1 vCPU
 - **RAM**: ~55 MB + ~90 MB per ytdlp process
 - **Storage**: depends on cache limit, 240 tracks ≈ 1 GB
-- **ffmpeg** (required for audio processing; not bundled with togewire)
-- **Golang 1.21+** *(if building from source)
+- **ffmpeg** (required for audio processing; must be in PATH)
+- **Golang 1.21+** *(only required if building from source)
 
 **Important:** This application is intended for local/residential deployment. YouTube may block requests from datacenter IP addresses.
 
@@ -27,7 +27,7 @@ For secure and easy external access, you may use Cloudflare Tunnel to expose you
 
 ## Quick Setup
 
-1. **Install system dependencies**
+1. **Install ffmpeg**
    ```bash
    # Ubuntu/Debian
    sudo apt update
@@ -40,12 +40,15 @@ For secure and easy external access, you may use Cloudflare Tunnel to expose you
    brew install ffmpeg
    ```
 
-2. **Build and Run**
-   ```bash
-   # Build the application
-   go build -o togewire cmd/togewire/main.go
+2. **Download and Run**
    
-   # Run the server (yt-dlp bin will be automatically downloaded on first run)
+   Download the latest release binary for your platform from [Releases](https://github.com/kurodaze/togewire/releases), or build from source:
+   ```bash
+   go build -o togewire cmd/togewire/main.go
+   ```
+   
+   Run the server:
+   ```bash
    ./togewire
    ```
 
