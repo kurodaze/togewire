@@ -206,19 +206,18 @@ func GenerateSetupToken() string {
 		return setupToken
 	}
 
-	bytes := make([]byte, 4)
-	if _, err := rand.Read(bytes); err != nil {
+	randomBytes := make([]byte, 8)
+	if _, err := rand.Read(randomBytes); err != nil {
 		panic(err)
 	}
 
 	// Generate a short readable token
 	const charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	token := make([]byte, 6)
-	for i := range token {
-		token[i] = charset[bytes[i%len(bytes)]%byte(len(charset))]
+	for i := range randomBytes {
+		randomBytes[i] = charset[randomBytes[i]%byte(len(charset))]
 	}
 
-	setupToken = string(token)
+	setupToken = string(randomBytes)
 	return setupToken
 }
 
