@@ -27,28 +27,35 @@ For secure and easy external access, you may use Cloudflare Tunnel to expose you
 
 ## Quick Setup
 
+### Docker
+
+```bash
+docker-compose up -d
+```
+
+Or build and run directly:
+```bash
+docker build -t togewire .
+docker run -d -p 7093:7093 -v ./configs:/app/configs -v ./data:/app/data togewire
+```
+
+### Native
+
 1. **Install ffmpeg**
    ```bash
    # Ubuntu/Debian
-   sudo apt update
-   sudo apt install ffmpeg
+   sudo apt update && sudo apt install ffmpeg
    
-   # Windows (using winget)
+   # Windows
    winget install ffmpeg
    
    # macOS
    brew install ffmpeg
    ```
 
-2. **Download and Run**
-   
-   Download the latest release binary for your platform from [Releases](https://github.com/kurodaze/togewire/releases), or build from source:
+2. **Run**
    ```bash
    go build -o togewire cmd/togewire/main.go
-   ```
-   
-   Run the server:
-   ```bash
    ./togewire
    ```
 

@@ -1,0 +1,44 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go build/coverage
+*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+LICENSE
+SECURITY.md
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Data and cache
+data/
+!data/.gitkeep
+
+# Config files (will be mounted as volumes)
+configs/config.json
