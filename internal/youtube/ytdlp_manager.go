@@ -9,12 +9,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	updateCheckFile = ".ytdlp_last_update"
+	updateCheckFile  = ".ytdlp_last_update"
+	updateInterval   = 7 * 24 * time.Hour
+	failureThreshold = 3
 )
 
 var (
@@ -26,7 +29,6 @@ type YtdlpManager struct {
 	binPath      string
 	binDir       string
 	mu           sync.RWMutex
-	lastUpdate   time.Time
 	failureCount int
 }
 
@@ -51,7 +53,6 @@ func GetYtdlpManager() *YtdlpManager {
 	return ytdlpManager
 }
 
-// getYtdlpBinaryName returns the binary name
 func getYtdlpBinaryName() string {
 	if runtime.GOOS == "windows" {
 		return "yt-dlp.exe"
@@ -59,18 +60,23 @@ func getYtdlpBinaryName() string {
 	return "yt-dlp"
 }
 
-// ensureYtdlp ensures yt-dlp is available and up-to-date
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func (m *YtdlpManager) ensureYtdlp() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if binary exists
-	if !m.fileExists(m.binPath) {
+	if !fileExists(m.binPath) {
 		log.Println("yt-dlp not found, downloading...")
-		return m.downloadYtdlp()
+		if err := m.downloadYtdlp(); err != nil {
+			log.Printf("Failed to download yt-dlp: %v", err)
+			return m.trySystemYtdlp()
+		}
 	}
 
-	// Check if update is needed (every 7 days)
 	if m.shouldUpdate() {
 		log.Println("Checking for yt-dlp updates...")
 		if err := m.updateYtdlp(); err != nil {
@@ -81,69 +87,61 @@ func (m *YtdlpManager) ensureYtdlp() error {
 	return nil
 }
 
-// GetBinaryPath returns the path to the yt-dlp binary
-func (m *YtdlpManager) GetBinaryPath() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.binPath
-}
-
-// RunCommand executes yt-dlp with the given arguments, auto-updating on failure
-func (m *YtdlpManager) RunCommand(args ...string) (*exec.Cmd, error) {
-	m.mu.RLock()
-	binPath := m.binPath
-	m.mu.RUnlock()
-
-	cmd := exec.Command(binPath, args...)
-	return cmd, nil
-}
-
-// HandleFailure increments failure count and triggers update if threshold reached
-func (m *YtdlpManager) HandleFailure(err error) error {
-	m.mu.Lock()
-	m.failureCount++
-	count := m.failureCount
-	m.mu.Unlock()
-
-	// Auto-update after 3 consecutive failures
-	if count >= 3 {
-		log.Println("Multiple yt-dlp failures, attempting auto-update...")
-		if updateErr := m.ForceUpdate(); updateErr != nil {
-			return fmt.Errorf("original error: %v, update failed: %v", err, updateErr)
-		}
-
-		m.mu.Lock()
-		m.failureCount = 0 // Reset counter after successful update
-		m.mu.Unlock()
-
-		log.Println("yt-dlp updated, retrying...")
-		return nil
+func (m *YtdlpManager) trySystemYtdlp() error {
+	systemPath, err := exec.LookPath("yt-dlp")
+	if err != nil {
+		return fmt.Errorf("managed yt-dlp download failed and system yt-dlp not found: %w", err)
 	}
 
-	return err
+	log.Printf("Using system yt-dlp at: %s", systemPath)
+	m.binPath = systemPath
+	return nil
 }
 
-// ResetFailures resets the failure counter (call after successful operation)
-func (m *YtdlpManager) ResetFailures() {
-	m.mu.Lock()
-	m.failureCount = 0
-	m.mu.Unlock()
+func (m *YtdlpManager) RunCommand(args ...string) (*exec.Cmd, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return exec.Command(m.binPath, args...), nil
 }
 
-// ForceUpdate forces an immediate update of yt-dlp
-func (m *YtdlpManager) ForceUpdate() error {
+func (m *YtdlpManager) HandleFailure(err error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.failureCount++
+	if m.failureCount < failureThreshold {
+		return err
+	}
+
+	log.Println("Multiple yt-dlp failures, attempting auto-update...")
+	if updateErr := m.updateYtdlp(); updateErr != nil {
+		return fmt.Errorf("original error: %v, update failed: %v", err, updateErr)
+	}
+
+	m.failureCount = 0
+	log.Println("yt-dlp updated, retrying...")
+	return nil
+}
+
+func (m *YtdlpManager) ResetFailures() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failureCount = 0
+}
+
+func (m *YtdlpManager) ForceUpdate() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	log.Println("Forcing yt-dlp update...")
 	return m.updateYtdlp()
 }
 
-// downloadYtdlp downloads the latest yt-dlp binary
 func (m *YtdlpManager) downloadYtdlp() error {
-	url := m.getBinaryURL()
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" {
+		return fmt.Errorf("platform %s not supported for managed yt-dlp", runtime.GOOS)
+	}
 
-	resp, err := http.Get(url)
+	resp, err := http.Get(m.getBinaryURL())
 	if err != nil {
 		return fmt.Errorf("failed to download: %w", err)
 	}
@@ -153,24 +151,22 @@ func (m *YtdlpManager) downloadYtdlp() error {
 		return fmt.Errorf("download failed with status: %d", resp.StatusCode)
 	}
 
-	// Create temporary file
 	tmpFile := m.binPath + ".tmp"
 	out, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
+	defer out.Close()
 
-	_, err = io.Copy(out, resp.Body)
-	out.Close()
-	if err != nil {
+	if _, err := io.Copy(out, resp.Body); err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 
-	// Move temp file to final location
-	if m.fileExists(m.binPath) {
+	if fileExists(m.binPath) {
 		os.Remove(m.binPath)
 	}
+
 	if err := os.Rename(tmpFile, m.binPath); err != nil {
 		return fmt.Errorf("failed to move file: %w", err)
 	}
@@ -180,67 +176,56 @@ func (m *YtdlpManager) downloadYtdlp() error {
 	return nil
 }
 
-// updateYtdlp updates yt-dlp using self-update or download
 func (m *YtdlpManager) updateYtdlp() error {
-	// Try self-update first
-	cmd := exec.Command(m.binPath, "-U")
-	if err := cmd.Run(); err == nil {
+	if m.isSystemYtdlp() {
+		log.Println("Using system yt-dlp, skipping update")
+		m.markUpdated()
+		return nil
+	}
+
+	if err := exec.Command(m.binPath, "-U").Run(); err == nil {
 		m.markUpdated()
 		log.Println("yt-dlp updated via self-update")
 		return nil
 	}
 
-	// Fallback to download
 	log.Println("Self-update failed, downloading fresh binary...")
 	return m.downloadYtdlp()
 }
 
-// shouldUpdate checks if update check is due
-func (m *YtdlpManager) shouldUpdate() bool {
-	checkFile := filepath.Join(m.binDir, updateCheckFile)
-	info, err := os.Stat(checkFile)
-	if err != nil {
-		return true // No check file, should update
-	}
-
-	return time.Since(info.ModTime()) > 7*24*time.Hour
+func (m *YtdlpManager) isSystemYtdlp() bool {
+	absDir, _ := filepath.Abs(m.binDir)
+	absBin, _ := filepath.Abs(m.binPath)
+	return !strings.HasPrefix(absBin, absDir)
 }
 
-// markUpdated marks the current time as last update check
+func (m *YtdlpManager) shouldUpdate() bool {
+	info, err := os.Stat(filepath.Join(m.binDir, updateCheckFile))
+	if err != nil {
+		return true
+	}
+	return time.Since(info.ModTime()) > updateInterval
+}
+
 func (m *YtdlpManager) markUpdated() {
 	checkFile := filepath.Join(m.binDir, updateCheckFile)
 	if err := os.WriteFile(checkFile, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
-		log.Printf("Failed to write ytdlp update check file: %v", err)
+		log.Printf("Failed to write update check file: %v", err)
 	}
-	m.lastUpdate = time.Now()
 }
 
-// getBinaryURL returns the download URL based on OS and architecture
 func (m *YtdlpManager) getBinaryURL() string {
+	const baseURL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
+
 	switch runtime.GOOS {
 	case "windows":
-		return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-	case "darwin":
-		return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+		return baseURL + "yt-dlp.exe"
 	case "linux":
-		// Check if Alpine/musl - needs Python version
-		if m.fileExists("/etc/alpine-release") {
-			return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+		if fileExists("/etc/alpine-release") || runtime.GOARCH == "arm64" || runtime.GOARCH == "arm" {
+			return baseURL + "yt-dlp"
 		}
-		// ARM64 requires Python-based version
-		if runtime.GOARCH == "arm64" || runtime.GOARCH == "arm" {
-			return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
-		}
-		// AMD64/x86_64 uses standalone binary (no Python needed)
-		return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+		return baseURL + "yt-dlp_linux"
 	default:
-		// Fallback to generic Python-based version
-		return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+		return baseURL + "yt-dlp"
 	}
-}
-
-// fileExists checks if a file exists
-func (m *YtdlpManager) fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

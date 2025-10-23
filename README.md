@@ -27,7 +27,7 @@ For secure and easy external access, you may use Cloudflare Tunnel to expose you
 
 ## Quick Setup
 
-### Docker
+### Docker (recommended)
 
 ```bash
 docker-compose up -d
@@ -41,7 +41,7 @@ docker run -d -p 7093:7093 -v ./configs:/app/configs -v ./data:/app/data togewir
 
 ### Native
 
-1. **Install ffmpeg**
+1. **Install dependencies**
    ```bash
    # Ubuntu/Debian
    sudo apt update && sudo apt install ffmpeg
@@ -50,7 +50,7 @@ docker run -d -p 7093:7093 -v ./configs:/app/configs -v ./data:/app/data togewir
    winget install ffmpeg
    
    # macOS
-   brew install ffmpeg
+   brew install ffmpeg yt-dlp
    ```
 
 2. **Run**
