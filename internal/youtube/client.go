@@ -789,9 +789,27 @@ func (c *Client) cleanupCacheIfNeeded() {
 		for _, key := range removedKeys {
 			delete(c.songCache, key)
 		}
+
+		// Also remove stale entries where file no longer exists
+		existingFiles := make(map[string]bool)
+		for _, file := range fileInfos {
+			existingFiles[file.path] = true
+		}
+
+		staleCount := 0
+		for key, entry := range c.songCache {
+			if entry.FilePath != "" && !existingFiles[entry.FilePath] {
+				delete(c.songCache, key)
+				staleCount++
+			}
+		}
 		c.mu.Unlock()
 
 		c.saveCache() // Update cache file
-		log.Printf("Cleanup complete: %d files removed", removedCount)
+		if staleCount > 0 {
+			log.Printf("Cleanup complete: %d files removed, %d stale entries cleaned", removedCount, staleCount)
+		} else {
+			log.Printf("Cleanup complete: %d files removed", removedCount)
+		}
 	}
 }
