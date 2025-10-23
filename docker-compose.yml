@@ -3,7 +3,8 @@ services:
     image: ghcr.io/kurodaze/togewire:latest
     container_name: togewire
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "7093:7093"
     # Uncomment to run as non-root (optional, may require: sudo chown -R $UID:$GID configs data)
     # user: "${UID:-1000}:${GID:-1000}"
     volumes:
