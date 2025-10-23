@@ -31,7 +31,7 @@ WORKDIR /app
 COPY --from=builder /build/togewire .
 
 # Create necessary directories
-RUN mkdir -p /app/configs /app/data/youtube_cache
+RUN mkdir -p /app/configs /app/data/youtube_cache /app/bin
 
 # Copy config example (optional, can be mounted as volume)
 COPY configs/config.example.json /app/configs/
