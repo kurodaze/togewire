@@ -19,9 +19,10 @@ RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o togewire ./cmd/togewire/main.go
 # Runtime stage
 FROM alpine:latest
 
-# Install ffmpeg and ca-certificates
+# Install ffmpeg, python3, and ca-certificates
 RUN apk add --no-cache \
     ffmpeg \
+    python3 \
     ca-certificates \
     tzdata
 

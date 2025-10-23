@@ -223,6 +223,10 @@ func (m *YtdlpManager) getBinaryURL() string {
 	case "darwin":
 		return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
 	case "linux":
+		// Check if Alpine/musl - needs Python version
+		if m.fileExists("/etc/alpine-release") {
+			return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+		}
 		// ARM64 requires Python-based version
 		if runtime.GOARCH == "arm64" || runtime.GOARCH == "arm" {
 			return "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
