@@ -712,9 +712,6 @@ func (c *Client) cleanupCacheIfNeeded() {
 		return
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	log.Printf("Cache cleanup: %d MB exceeds %d MB limit",
 		totalSize/(1024*1024), cfg.CacheMaxSizeMB)
 
@@ -728,6 +725,7 @@ func (c *Client) cleanupCacheIfNeeded() {
 
 	var fileInfos []fileInfo
 
+	// Do file I/O without holding the lock
 	for _, ext := range cacheExtensions {
 		files, err := filepath.Glob(filepath.Join(c.cacheDir, ext))
 		if err != nil {
@@ -736,7 +734,8 @@ func (c *Client) cleanupCacheIfNeeded() {
 
 		for _, file := range files {
 			if info, err := os.Stat(file); err == nil {
-				// Find corresponding cache key
+				// Find corresponding cache key with read lock
+				c.mu.RLock()
 				var cacheKey string
 				for key, entry := range c.songCache {
 					if entry.FilePath == file {
@@ -744,6 +743,7 @@ func (c *Client) cleanupCacheIfNeeded() {
 						break
 					}
 				}
+				c.mu.RUnlock()
 
 				fileInfos = append(fileInfos, fileInfo{
 					path:     file,
@@ -760,9 +760,10 @@ func (c *Client) cleanupCacheIfNeeded() {
 		return fileInfos[i].modTime.Before(fileInfos[j].modTime)
 	})
 
-	// Remove oldest files until under the limit
+	// Remove oldest files until under the limit (without holding lock during I/O)
 	removedCount := 0
 	currentSize := totalSize
+	var removedKeys []string
 
 	for _, file := range fileInfos {
 		if currentSize <= maxSizeBytes {
@@ -773,9 +774,9 @@ func (c *Client) cleanupCacheIfNeeded() {
 			currentSize -= file.size
 			removedCount++
 
-			// Remove from memory cache
+			// Track keys to remove from cache
 			if file.cacheKey != "" {
-				delete(c.songCache, file.cacheKey)
+				removedKeys = append(removedKeys, file.cacheKey)
 			}
 
 			log.Printf("Removed: %s", filepath.Base(file.path))
@@ -783,6 +784,13 @@ func (c *Client) cleanupCacheIfNeeded() {
 	}
 
 	if removedCount > 0 {
+		// Update cache with write lock
+		c.mu.Lock()
+		for _, key := range removedKeys {
+			delete(c.songCache, key)
+		}
+		c.mu.Unlock()
+
 		c.saveCache() // Update cache file
 		log.Printf("Cleanup complete: %d files removed", removedCount)
 	}
