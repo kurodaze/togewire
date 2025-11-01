@@ -86,14 +86,11 @@ TOGEWIRE is built in Golang for high performance and low resource usage:
 - **Backend**: Go with Gin web framework
 - **WebSocket**: Gorilla WebSocket for real-time communication  
 - **Audio Processing**: yt-dlp + ffmpeg for YouTube audio extraction
-- **Spotify Integration**: Web API with OAuth2 authentication
+- **Audio Format**: Opus codec for optimal quality and storage efficiency
 - **Frontend**: Vanilla JavaScript with WebSocket streaming
 - **Caching**: File-based audio cache with configurable size limits
-
 - **Real-time sync**: WebSocket-based audio synchronization with Spotify
-- **Smart caching**: Intelligent audio file caching with cleanup
 - **Track preparation**: Background preparation of upcoming tracks
-- **Audio streaming**: Chunked audio streaming over WebSocket
 - **Auto-updates**: Automatic yt-dlp management with self-healing on failures
 - **Responsive UI**: Works on desktop and mobile devices
 
