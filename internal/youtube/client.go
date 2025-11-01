@@ -26,11 +26,13 @@ const (
 )
 
 type Client struct {
-	cache       *cache.Manager
-	preparing   sync.Map      // track key -> bool
-	failed      sync.Map      // track key -> bool
-	downloading sync.Map      // video ID -> bool
-	downloadSem chan struct{} // Semaphore to limit concurrent downloads
+	cache            *cache.Manager
+	preparing        sync.Map      // track key -> bool
+	failed           sync.Map      // track key -> bool
+	downloading      sync.Map      // video ID -> bool
+	downloadSem      chan struct{} // Semaphore to limit concurrent downloads
+	lastDownloadTime time.Time     // Track last download activity
+	downloadTimeMu   sync.RWMutex
 }
 
 type SearchResult struct {
@@ -65,8 +67,9 @@ func New() *Client {
 	GetYtdlpManager()
 
 	client := &Client{
-		cache:       cache.New(),
-		downloadSem: make(chan struct{}, 2), // Limit to 2 concurrent downloads
+		cache:            cache.New(),
+		downloadSem:      make(chan struct{}, 2), // Limit to 2 concurrent downloads
+		lastDownloadTime: time.Now(),
 	}
 
 	return client
@@ -83,7 +86,6 @@ func (c *Client) getCacheKey(track *types.Track) string {
 	return fmt.Sprintf("%s|%s", strings.TrimSpace(name), strings.TrimSpace(artist))
 }
 
-// IsPreparingTrack checks if a track is currently being prepared
 func (c *Client) IsPreparingTrack(track *types.Track) bool {
 	if track == nil {
 		return false
@@ -103,18 +105,15 @@ func (c *Client) PrepareTrack(track *types.Track) (string, error) {
 	trackKey := fmt.Sprintf("%s|%s", track.Name, track.Artist)
 	cacheKey := c.getCacheKey(track)
 
-	// Check if already being prepared
 	if _, loading := c.preparing.LoadOrStore(trackKey, true); loading {
 		return "", fmt.Errorf("track already being prepared")
 	}
 	defer c.preparing.Delete(trackKey)
 
-	// Check if previously failed
 	if _, failed := c.failed.Load(trackKey); failed {
 		return "", fmt.Errorf("track previously failed")
 	}
 
-	// Check cache
 	if cached, exists := c.cache.Get(cacheKey); exists {
 		log.Printf("Cache hit: %s - %s", track.Name, track.Artist)
 
@@ -122,7 +121,7 @@ func (c *Client) PrepareTrack(track *types.Track) (string, error) {
 		c.cache.MarkAccessed(cacheKey)
 
 		return filepath.Abs(cached.FilePath)
-	} // Search YouTube
+	}
 	videoID, queryType, err := c.searchYoutube(track)
 	if err != nil {
 		c.failed.Store(trackKey, true)
@@ -130,7 +129,6 @@ func (c *Client) PrepareTrack(track *types.Track) (string, error) {
 		return "", fmt.Errorf("search failed: %w", err)
 	}
 
-	// Download and cache
 	filePath, err := c.downloadAndCacheTrack(track, videoID, queryType)
 	if err != nil {
 		c.failed.Store(trackKey, true)
@@ -174,9 +172,7 @@ func (c *Client) searchYoutube(track *types.Track) (string, string, error) {
 	return "", "", fmt.Errorf("no suitable video found")
 }
 
-// searchWithQuery performs a search with a specific query
 func (c *Client) searchWithQuery(query SearchQuery, track *types.Track) (string, error) {
-	// Execute yt-dlp search
 	mgr := GetYtdlpManager()
 	cmd, err := mgr.RunCommand(
 		"--dump-json",
@@ -192,8 +188,7 @@ func (c *Client) searchWithQuery(query SearchQuery, track *types.Track) (string,
 
 	output, err := cmd.CombinedOutput()
 
-	// Parse results even if there was an error, because yt-dlp might have
-	// outputted valid results before encountering an age-restricted video
+	// to prevent restricted videos from blocking
 	results, parseErr := c.parseSearchResults(string(output))
 
 	if err != nil && len(results) == 0 {
@@ -217,7 +212,6 @@ func (c *Client) searchWithQuery(query SearchQuery, track *types.Track) (string,
 		log.Printf("%s  %d. '%s' by %s%s", query.Color, i+1, result.Title, result.Uploader, ColorReset)
 	}
 
-	// Find best match
 	bestMatch := c.findBestMatch(results, track, query)
 	if bestMatch != nil {
 		return bestMatch.ID, nil
@@ -376,7 +370,7 @@ func (c *Client) findBestMatch(results []*SearchResult, track *types.Track, quer
 	return nil
 }
 
-// Compile regex patterns once at package level for efficiency
+// Compile regex patterns once
 var (
 	separatorsRe  = regexp.MustCompile(`[,&]`)
 	featRe        = regexp.MustCompile(`\b(feat\.|ft\.)\b`)
@@ -434,9 +428,7 @@ func abs(x int64) int64 {
 	return x
 }
 
-// downloadAndCacheTrack downloads a YouTube video and caches it
 func (c *Client) downloadAndCacheTrack(track *types.Track, videoID, queryType string) (string, error) {
-	// Check if already downloading this video
 	if _, downloading := c.downloading.LoadOrStore(videoID, true); downloading {
 		return "", fmt.Errorf("video already being downloaded")
 	}
@@ -486,6 +478,11 @@ func (c *Client) downloadAndCacheTrack(track *types.Track, videoID, queryType st
 
 		c.cache.Add(cacheKey, entry)
 
+		// Track download activity
+		c.downloadTimeMu.Lock()
+		c.lastDownloadTime = time.Now()
+		c.downloadTimeMu.Unlock()
+
 		log.Printf("Downloaded [%s/%s]: %s",
 			method.name, queryType, filepath.Base(filePath))
 
@@ -495,7 +492,6 @@ func (c *Client) downloadAndCacheTrack(track *types.Track, videoID, queryType st
 	return "", fmt.Errorf("all download methods failed: %v", lastErr)
 }
 
-// tryDownloadMethod attempts to download using a specific method
 func (c *Client) tryDownloadMethod(videoID, format, methodName string) (string, error) {
 	outputTemplate := c.cache.GetOutputTemplate()
 
@@ -528,21 +524,75 @@ func (c *Client) tryDownloadMethod(videoID, format, methodName string) (string, 
 
 	mgr.ResetFailures()
 
-	// Find the downloaded file
 	return c.findDownloadedFile(videoID)
 }
 
-// findDownloadedFile finds the downloaded file in cache directory
 func (c *Client) findDownloadedFile(videoID string) (string, error) {
 	return c.cache.FindDownloadedFile(videoID)
 }
 
-// GetCacheStats returns cache statistics
 func (c *Client) GetCacheStats() cache.Stats {
 	return c.cache.GetStats()
 }
 
-// ClearCache removes all cached files and metadata
 func (c *Client) ClearCache() error {
 	return c.cache.Clear()
+}
+
+// UpgradeTrack attempts to re-download a track with best_audio method
+// Returns nil without error if upgrade fails (keeps existing lower quality)
+func (c *Client) UpgradeTrack(cacheKey string, entry *cache.Entry) error {
+	log.Printf("Upgrading track quality: %s (from %s to best_audio)", entry.Title, entry.DownloadMethod)
+
+	// Try to download with best_audio only (don't remove old file yet)
+	filePath, err := c.tryDownloadMethod(entry.VideoID, "ba", "best_audio")
+	if err != nil {
+		log.Printf("Could not upgrade track, keeping %s quality: %s", entry.DownloadMethod, entry.Title)
+		return nil // Return nil to skip, not an error
+	}
+
+	// Success - remove old file
+	if err := os.Remove(entry.FilePath); err != nil {
+		log.Printf("Warning: Failed to remove old file: %v", err)
+	}
+
+	// Update cache entry
+	now := time.Now().Unix()
+	entry.FilePath = filePath
+	entry.DownloadMethod = "best_audio"
+	entry.LastAccessedAt = now
+
+	// Get new file size
+	if info, err := os.Stat(filePath); err == nil {
+		entry.FileSize = info.Size()
+	}
+
+	c.cache.Add(cacheKey, entry)
+
+	// Track download activity
+	c.downloadTimeMu.Lock()
+	c.lastDownloadTime = time.Now()
+	c.downloadTimeMu.Unlock()
+
+	log.Printf("Successfully upgraded: %s", entry.Title)
+	return nil
+}
+
+func (c *Client) GetEntriesNeedingUpgrade() map[string]*cache.Entry {
+	return c.cache.GetEntriesNeedingUpgrade()
+}
+
+func (c *Client) GetTimeSinceLastDownload() time.Duration {
+	c.downloadTimeMu.RLock()
+	defer c.downloadTimeMu.RUnlock()
+	return time.Since(c.lastDownloadTime)
+}
+
+func (c *Client) IsCurrentlyDownloading() bool {
+	isDownloading := false
+	c.downloading.Range(func(key, value interface{}) bool {
+		isDownloading = true
+		return false // Stop iteration
+	})
+	return isDownloading
 }

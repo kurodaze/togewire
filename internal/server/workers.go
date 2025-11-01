@@ -303,3 +303,106 @@ func (s *Server) broadcastTrackUpdate(state *types.SpotifyState, trackChanged bo
 		log.Println("Warning: Broadcast channel full")
 	}
 }
+
+// idleOptimizationWorker upgrades low-quality cached tracks when yt-dlp is idle
+func (s *Server) idleOptimizationWorker() {
+	const idleThreshold = 2 * time.Hour
+	const maxUpgradesPerRun = 10
+	const checkInterval = 5 * time.Minute
+
+	log.Println("Idle optimization worker started")
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	upgradeTimer := time.NewTimer(0)
+	upgradeTimer.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+
+		case <-ticker.C:
+			// Check if yt-dlp has been idle long enough
+			timeSinceDownload := s.youtubeClient.GetTimeSinceLastDownload()
+
+			if timeSinceDownload < idleThreshold {
+				upgradeTimer.Stop()
+				continue
+			}
+
+			if s.youtubeClient.IsCurrentlyDownloading() {
+				upgradeTimer.Stop()
+				continue
+			}
+
+			needsUpgrade := s.youtubeClient.GetEntriesNeedingUpgrade()
+			if len(needsUpgrade) == 0 {
+				continue
+			}
+
+			upgradeTimer.Reset(0)
+
+		case <-upgradeTimer.C:
+			if s.youtubeClient.IsCurrentlyDownloading() {
+				log.Println("Download activity detected, skipping upgrade cycle")
+				continue
+			}
+
+			timeSinceDownload := s.youtubeClient.GetTimeSinceLastDownload()
+			if timeSinceDownload < idleThreshold {
+				log.Println("Recent download activity detected, skipping upgrade cycle")
+				continue
+			}
+
+			needsUpgrade := s.youtubeClient.GetEntriesNeedingUpgrade()
+			if len(needsUpgrade) == 0 {
+				continue
+			}
+
+			totalTracks := len(needsUpgrade)
+			upgradeCount := min(totalTracks, maxUpgradesPerRun)
+
+			log.Printf("yt-dlp idle for %v, upgrading up to %d low-quality tracks (from %d total)...",
+				timeSinceDownload.Round(time.Minute), upgradeCount, totalTracks)
+
+			upgraded := 0
+			skipped := 0
+
+			for key, entry := range needsUpgrade {
+				if upgraded >= maxUpgradesPerRun {
+					break
+				}
+
+				if s.youtubeClient.IsCurrentlyDownloading() {
+					log.Printf("Download activity detected, pausing optimization (upgraded %d, skipped %d)", upgraded, skipped)
+					upgradeTimer.Stop()
+					break
+				}
+
+				// Upgrade track
+				if err := s.youtubeClient.UpgradeTrack(key, entry); err == nil {
+					upgraded++
+				} else {
+					skipped++
+				}
+
+				// Small delay between upgrades
+				time.Sleep(2 * time.Second)
+			}
+
+			if upgraded > 0 || skipped > 0 {
+				log.Printf("Optimization cycle complete: upgraded %d tracks, skipped %d", upgraded, skipped)
+			}
+
+			// Check if there are still tracks needing upgrade
+			remainingUpgrades := s.youtubeClient.GetEntriesNeedingUpgrade()
+			if len(remainingUpgrades) > 0 && !s.youtubeClient.IsCurrentlyDownloading() {
+				log.Printf("%d tracks still need upgrade, scheduling next cycle in %v",
+					len(remainingUpgrades), idleThreshold)
+				upgradeTimer.Reset(idleThreshold)
+			}
+		}
+	}
+}

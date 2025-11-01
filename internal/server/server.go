@@ -189,8 +189,11 @@ func (s *Server) startBackgroundWorkers() {
 	// WebSocket broadcast worker
 	go s.broadcastWorker()
 
-	// Spotify monitoring worker (handles track changes and queue monitoring)
+	// handles track changes and queue monitoring
 	go s.spotifyMonitorWorker()
+
+	// tries to upgrade low-quality tracks when idle
+	go s.idleOptimizationWorker()
 
 	log.Println("Background workers started")
 }

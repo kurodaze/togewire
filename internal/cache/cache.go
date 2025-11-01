@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	// cache directory
 	CacheDir = "data/youtube_cache"
 )
 
@@ -46,10 +45,9 @@ type Stats struct {
 	SizeMB int64 `json:"size_mb"`
 }
 
-// Valid audio/video extensions for cached files
 var validExtensions = []string{".opus", ".webm", ".ogg", ".m4a", ".mp4", ".mkv"}
 
-// New creates a new cache manager
+// create new cache manager
 func New() *Manager {
 	cacheDir := CacheDir
 	cacheFile := filepath.Join(cacheDir, "_metadata.json")
@@ -69,7 +67,7 @@ func New() *Manager {
 	return m
 }
 
-// load reads cache metadata from disk
+// reads cache metadata from disk
 func (m *Manager) load() {
 	data, err := os.ReadFile(m.cacheFile)
 	if err != nil {
@@ -84,7 +82,7 @@ func (m *Manager) load() {
 	}
 }
 
-// save writes cache metadata to disk
+// writes cache metadata to disk
 func (m *Manager) save() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -100,7 +98,7 @@ func (m *Manager) save() {
 	}
 }
 
-// Get retrieves a cache entry by key
+// retrieves a cache entry by key
 func (m *Manager) Get(key string) (*Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -118,7 +116,7 @@ func (m *Manager) Get(key string) (*Entry, bool) {
 	return entry, true
 }
 
-// MarkAccessed updates the last accessed time for a cache entry
+// updates the last accessed time for a cache entry
 func (m *Manager) MarkAccessed(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -128,7 +126,7 @@ func (m *Manager) MarkAccessed(key string) {
 	}
 }
 
-// Add adds a new entry to the cache
+// adds a new entry to the cache
 func (m *Manager) Add(key string, entry *Entry) {
 	m.mu.Lock()
 	m.entries[key] = entry
@@ -138,7 +136,7 @@ func (m *Manager) Add(key string, entry *Entry) {
 	m.CleanupIfNeeded()
 }
 
-// Remove removes an entry from the cache
+// removes an entry from the cache
 func (m *Manager) Remove(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -146,7 +144,7 @@ func (m *Manager) Remove(key string) {
 	delete(m.entries, key)
 }
 
-// GetStats returns cache statistics
+// returns cache statistics
 func (m *Manager) GetStats() Stats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -160,7 +158,7 @@ func (m *Manager) GetStats() Stats {
 	}
 }
 
-// calculateSize calculates total cache size and file count
+// calculates total cache size and file count
 func (m *Manager) calculateSize() (int64, int) {
 	var totalSize int64
 	totalFiles := 0
@@ -217,7 +215,7 @@ func (m *Manager) Clear() error {
 	return nil
 }
 
-// CleanupIfNeeded removes least recently used files if cache exceeds size limit
+// removes least recently used files if cache exceeds size limit
 func (m *Manager) CleanupIfNeeded() {
 	cfg := config.Get()
 	if cfg.CacheMaxSizeMB <= 0 {
@@ -363,7 +361,23 @@ func (m *Manager) FindDownloadedFile(videoID string) (string, error) {
 	return "", fmt.Errorf("downloaded file not found")
 }
 
-// GetOutputTemplate returns the yt-dlp output template for the cache directory
+// returns the yt-dlp output template for the cache directory
 func (m *Manager) GetOutputTemplate() string {
 	return filepath.Join(m.cacheDir, "%(title)s [%(id)s].%(ext)s")
+}
+
+// returns cache entries that were downloaded with fallback methods
+func (m *Manager) GetEntriesNeedingUpgrade() map[string]*Entry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	needsUpgrade := make(map[string]*Entry)
+	for key, entry := range m.entries {
+		// Only upgrade entries that used fallback methods
+		if entry.DownloadMethod != "best_audio" {
+			needsUpgrade[key] = entry
+		}
+	}
+
+	return needsUpgrade
 }
