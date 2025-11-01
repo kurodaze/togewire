@@ -33,9 +33,8 @@ For secure and easy external access, you may use Cloudflare Tunnel to expose you
 docker-compose up -d
 ```
 
-Or build and run directly:
+Or run directly:
 ```bash
-docker build -t togewire .
 docker run -d -p 7093:7093 -v ./configs:/app/configs -v ./data:/app/data togewire
 ```
 
@@ -50,26 +49,22 @@ docker run -d -p 7093:7093 -v ./configs:/app/configs -v ./data:/app/data togewir
    winget install ffmpeg
    
    # macOS
-   brew install ffmpeg yt-dlp
+   brew install ffmpeg ytdlp
    ```
 
-2. **Run**
-   ```bash
-   go build -o togewire cmd/togewire/main.go
-   ./togewire
-   ```
+2. **Download and run**
+   - Download the latest release from [GitHub Releases](https://github.com/kurodaze/togewire/releases)
+   - run: `./togewire` (Linux/macOS) or `togewire.exe` (Windows)
 
-3. **Configure**
+### Configuration (Docker & Native)
+
+1. **Setup Spotify OAuth**
    - Visit [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
    - Create a new app
    - Set redirect URI to: `http://ip:7093/callback` or `https://togewire.domain.tld/callback`
-   - copy your Spotify credentials
-   - Authenticate with Spotify
+   - Copy your Spotify credentials and configure via web interface
 
-### Configuration
-- All configuration settings are stored in `configs/config.json` (auto-generated on first run)
-- An example configuration is available in `configs/config.example.json`
-- To update your configuration, delete the `config.json` file and restart the server to generate a new one.
+**Note:** Configuration is in `configs/config.json` (auto-generated on first run). See `configs/config.example.json` for reference.
 
 ### Usage
 
@@ -81,14 +76,14 @@ to embed the player in your website, see the iframe code at `web/togeplayer-ifra
 
 ## Architecture and features
 
-TOGEWIRE is built in Golang for high performance and low resource usage:
+TOGEWIRE is a Golang project built for high performance and low resource usage
 
-- **Backend**: Go with Gin web framework
+- **Backend**: Gin web framework
 - **WebSocket**: Gorilla WebSocket for real-time communication  
 - **Audio Processing**: yt-dlp + ffmpeg for YouTube audio extraction
 - **Audio Format**: Opus codec for optimal quality and storage efficiency
-- **Frontend**: Vanilla JavaScript with WebSocket streaming
-- **Caching**: File-based audio cache with configurable size limits
+- **Frontend**: Vanilla JavaScript
+- **Caching**: configurable File-based audio cache
 - **Real-time sync**: WebSocket-based audio synchronization with Spotify
 - **Track preparation**: Background preparation of upcoming tracks
 - **Auto-updates**: Automatic yt-dlp management with self-healing on failures
