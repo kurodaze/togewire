@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kurodaze/togewire/internal/config"
+	"github.com/kurodaze/togewire/internal/cache"
 	"github.com/kurodaze/togewire/internal/types"
 )
 
@@ -26,25 +26,11 @@ const (
 )
 
 type Client struct {
-	cacheDir    string
-	cacheFile   string
-	songCache   map[string]*CacheEntry
+	cache       *cache.Manager
 	preparing   sync.Map      // track key -> bool
 	failed      sync.Map      // track key -> bool
 	downloading sync.Map      // video ID -> bool
 	downloadSem chan struct{} // Semaphore to limit concurrent downloads
-	mu          sync.RWMutex
-}
-
-type CacheEntry struct {
-	VideoID        string `json:"video_id"`
-	Title          string `json:"title"`
-	CachedAt       int64  `json:"cached_at"`
-	DurationMS     int64  `json:"duration_ms"`
-	FilePath       string `json:"file_path"`
-	FileSize       int64  `json:"file_size"`
-	DownloadMethod string `json:"download_method"`
-	QueryType      string `json:"query_type"`
 }
 
 type SearchResult struct {
@@ -75,53 +61,15 @@ type CacheStats struct {
 
 // New creates a new YouTube downloader client
 func New() *Client {
-	cacheDir := filepath.Join("data", "youtube_cache")
-
-	// Create cache directory if it doesn't exist
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		log.Printf("Failed to create cache directory: %v", err)
-	}
-
 	// Initialize yt-dlp manager
 	GetYtdlpManager()
 
 	client := &Client{
-		cacheDir:    cacheDir,
-		cacheFile:   filepath.Join(cacheDir, "_metadata.json"),
-		songCache:   make(map[string]*CacheEntry),
+		cache:       cache.New(),
 		downloadSem: make(chan struct{}, 2), // Limit to 2 concurrent downloads
 	}
 
-	client.loadCache()
 	return client
-}
-
-// loadCache loads the song cache from file
-func (c *Client) loadCache() {
-	if data, err := os.ReadFile(c.cacheFile); err == nil {
-		if err := json.Unmarshal(data, &c.songCache); err != nil {
-			log.Printf("Error loading cache: %v", err)
-			c.songCache = make(map[string]*CacheEntry)
-		} else {
-			log.Printf("Loaded %d cached songs", len(c.songCache))
-		}
-	}
-}
-
-// saveCache saves the song cache to file
-func (c *Client) saveCache() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	data, err := json.MarshalIndent(c.songCache, "", "  ")
-	if err != nil {
-		log.Printf("Error marshaling cache: %v", err)
-		return
-	}
-
-	if err := os.WriteFile(c.cacheFile, data, 0644); err != nil {
-		log.Printf("Error saving cache: %v", err)
-	}
 }
 
 // getCacheKey generates cache key using Spotify track ID or fallback
@@ -167,23 +115,14 @@ func (c *Client) PrepareTrack(track *types.Track) (string, error) {
 	}
 
 	// Check cache
-	c.mu.RLock()
-	cached, exists := c.songCache[cacheKey]
-	c.mu.RUnlock()
-
-	if exists && cached.FilePath != "" && c.fileExists(cached.FilePath) {
+	if cached, exists := c.cache.Get(cacheKey); exists {
 		log.Printf("Cache hit: %s - %s", track.Name, track.Artist)
+
+		// Update last accessed time for LRU tracking
+		c.cache.MarkAccessed(cacheKey)
+
 		return filepath.Abs(cached.FilePath)
-	}
-
-	// Remove invalid cache entry if exists
-	if exists {
-		c.mu.Lock()
-		delete(c.songCache, cacheKey)
-		c.mu.Unlock()
-	}
-
-	// Search YouTube
+	} // Search YouTube
 	videoID, queryType, err := c.searchYoutube(track)
 	if err != nil {
 		c.failed.Store(trackKey, true)
@@ -495,14 +434,6 @@ func abs(x int64) int64 {
 	return x
 }
 
-// fileExists checks if a file exists
-func (c *Client) fileExists(path string) bool {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return false
-	}
-	return true
-}
-
 // downloadAndCacheTrack downloads a YouTube video and caches it
 func (c *Client) downloadAndCacheTrack(track *types.Track, videoID, queryType string) (string, error) {
 	// Check if already downloading this video
@@ -536,10 +467,12 @@ func (c *Client) downloadAndCacheTrack(track *types.Track, videoID, queryType st
 
 		// Success - cache the result
 		cacheKey := c.getCacheKey(track)
-		entry := &CacheEntry{
+		now := time.Now().Unix()
+		entry := &cache.Entry{
 			VideoID:        videoID,
 			Title:          fmt.Sprintf("%s - %s", track.Name, track.Artist),
-			CachedAt:       time.Now().Unix(),
+			CachedAt:       now,
+			LastAccessedAt: now, // Set initial access time to download time
 			DurationMS:     track.Duration,
 			FilePath:       filePath,
 			DownloadMethod: method.name,
@@ -551,16 +484,10 @@ func (c *Client) downloadAndCacheTrack(track *types.Track, videoID, queryType st
 			entry.FileSize = info.Size()
 		}
 
-		c.mu.Lock()
-		c.songCache[cacheKey] = entry
-		c.mu.Unlock()
-		c.saveCache()
+		c.cache.Add(cacheKey, entry)
 
 		log.Printf("Downloaded [%s/%s]: %s",
 			method.name, queryType, filepath.Base(filePath))
-
-		// Cleanup cache if needed
-		c.cleanupCacheIfNeeded()
 
 		return filepath.Abs(filePath)
 	}
@@ -570,7 +497,7 @@ func (c *Client) downloadAndCacheTrack(track *types.Track, videoID, queryType st
 
 // tryDownloadMethod attempts to download using a specific method
 func (c *Client) tryDownloadMethod(videoID, format, methodName string) (string, error) {
-	outputTemplate := filepath.Join(c.cacheDir, "%(title)s [%(id)s].%(ext)s")
+	outputTemplate := c.cache.GetOutputTemplate()
 
 	args := []string{
 		"--format", format,
@@ -605,211 +532,17 @@ func (c *Client) tryDownloadMethod(videoID, format, methodName string) (string, 
 	return c.findDownloadedFile(videoID)
 }
 
-// Valid audio/video extensions for downloaded files
-var validExtensions = []string{".opus", ".webm", ".ogg", ".m4a", ".mp4", ".mkv"}
-
 // findDownloadedFile finds the downloaded file in cache directory
 func (c *Client) findDownloadedFile(videoID string) (string, error) {
-	files, err := filepath.Glob(filepath.Join(c.cacheDir, "*"+videoID+"*"))
-	if err != nil {
-		return "", fmt.Errorf("failed to search for downloaded file: %w", err)
-	}
-
-	for _, file := range files {
-		for _, ext := range validExtensions {
-			if strings.HasSuffix(file, ext) {
-				return file, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("downloaded file not found")
+	return c.cache.FindDownloadedFile(videoID)
 }
 
 // GetCacheStats returns cache statistics
-func (c *Client) GetCacheStats() CacheStats {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	totalSize, totalFiles := c.calculateCacheSize()
-
-	return CacheStats{
-		Songs:  len(c.songCache),
-		Files:  totalFiles,
-		SizeMB: totalSize / (1024 * 1024),
-	}
+func (c *Client) GetCacheStats() cache.Stats {
+	return c.cache.GetStats()
 }
 
 // ClearCache removes all cached files and metadata
 func (c *Client) ClearCache() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Clear memory cache
-	c.songCache = make(map[string]*CacheEntry)
-
-	// Remove cache metadata file
-	os.Remove(c.cacheFile)
-
-	// Remove all audio files
-	removedCount := 0
-
-	for _, ext := range cacheExtensions {
-		files, err := filepath.Glob(filepath.Join(c.cacheDir, ext))
-		if err != nil {
-			continue
-		}
-
-		for _, file := range files {
-			if err := os.Remove(file); err != nil {
-				log.Printf("Failed to remove cached file %s: %v", file, err)
-			} else {
-				removedCount++
-			}
-		}
-	}
-
-	log.Printf("Cache cleared: %d files removed", removedCount)
-	return nil
-}
-
-// Extension patterns shared across methods
-var cacheExtensions = []string{"*.opus", "*.webm", "*.m4a", "*.mp4", "*.mkv", "*.ogg"}
-
-// calculateCacheSize calculates total cache size and file count
-func (c *Client) calculateCacheSize() (int64, int) {
-	var totalSize int64
-	totalFiles := 0
-
-	for _, ext := range cacheExtensions {
-		files, err := filepath.Glob(filepath.Join(c.cacheDir, ext))
-		if err != nil {
-			continue
-		}
-
-		for _, file := range files {
-			if info, err := os.Stat(file); err == nil {
-				totalSize += info.Size()
-				totalFiles++
-			}
-		}
-	}
-
-	return totalSize, totalFiles
-}
-
-// cleanupCacheIfNeeded removes old files if cache size exceeds limit
-func (c *Client) cleanupCacheIfNeeded() {
-	cfg := config.Get()
-	if cfg.CacheMaxSizeMB <= 0 {
-		return
-	}
-
-	totalSize, _ := c.calculateCacheSize()
-	maxSizeBytes := int64(cfg.CacheMaxSizeMB) * 1024 * 1024
-
-	if totalSize <= maxSizeBytes {
-		return
-	}
-
-	log.Printf("Cache cleanup: %d MB exceeds %d MB limit",
-		totalSize/(1024*1024), cfg.CacheMaxSizeMB)
-
-	// Get all audio files with their modification times
-	type fileInfo struct {
-		path     string
-		modTime  time.Time
-		size     int64
-		cacheKey string
-	}
-
-	var fileInfos []fileInfo
-
-	// Do file I/O without holding the lock
-	for _, ext := range cacheExtensions {
-		files, err := filepath.Glob(filepath.Join(c.cacheDir, ext))
-		if err != nil {
-			continue
-		}
-
-		for _, file := range files {
-			if info, err := os.Stat(file); err == nil {
-				// Find corresponding cache key with read lock
-				c.mu.RLock()
-				var cacheKey string
-				for key, entry := range c.songCache {
-					if entry.FilePath == file {
-						cacheKey = key
-						break
-					}
-				}
-				c.mu.RUnlock()
-
-				fileInfos = append(fileInfos, fileInfo{
-					path:     file,
-					modTime:  info.ModTime(),
-					size:     info.Size(),
-					cacheKey: cacheKey,
-				})
-			}
-		}
-	}
-
-	// Sort by modification time (oldest first)
-	sort.Slice(fileInfos, func(i, j int) bool {
-		return fileInfos[i].modTime.Before(fileInfos[j].modTime)
-	})
-
-	// Remove oldest files until under the limit (without holding lock during I/O)
-	removedCount := 0
-	currentSize := totalSize
-	var removedKeys []string
-
-	for _, file := range fileInfos {
-		if currentSize <= maxSizeBytes {
-			break
-		}
-
-		if err := os.Remove(file.path); err == nil {
-			currentSize -= file.size
-			removedCount++
-
-			// Track keys to remove from cache
-			if file.cacheKey != "" {
-				removedKeys = append(removedKeys, file.cacheKey)
-			}
-
-			log.Printf("Removed: %s", filepath.Base(file.path))
-		}
-	}
-
-	if removedCount > 0 {
-		// Update cache with write lock
-		c.mu.Lock()
-		for _, key := range removedKeys {
-			delete(c.songCache, key)
-		}
-
-		// Also remove stale entries where file no longer exists
-		existingFiles := make(map[string]bool)
-		for _, file := range fileInfos {
-			existingFiles[file.path] = true
-		}
-
-		staleCount := 0
-		for key, entry := range c.songCache {
-			if entry.FilePath != "" && !existingFiles[entry.FilePath] {
-				delete(c.songCache, key)
-				staleCount++
-			}
-		}
-		c.mu.Unlock()
-
-		c.saveCache() // Update cache file
-		if staleCount > 0 {
-			log.Printf("Cleanup complete: %d files removed, %d stale entries cleaned", removedCount, staleCount)
-		} else {
-			log.Printf("Cleanup complete: %d files removed", removedCount)
-		}
-	}
+	return c.cache.Clear()
 }
