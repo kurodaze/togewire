@@ -9,7 +9,7 @@ Share your Spotify listening session with anyone via your own website.
 ## Requirements
 
 - **CPU**: 1 vCPU
-- **RAM**: ~55 MB + ~90 MB per ytdlp process
+- **RAM**: ~55 MB + ~90 MB per yt-dlp process
 - **Storage**: depends on cache limit, 240 tracks ≈ 1 GB
 - **ffmpeg** (required for audio processing; must be in PATH)
 - **Golang 1.21+** *(only required if building from source)
@@ -49,7 +49,7 @@ docker run -d -p 7093:7093 -v ./configs:/app/configs -v ./data:/app/data togewir
    winget install ffmpeg
    
    # macOS
-   brew install ffmpeg ytdlp
+   brew install ffmpeg yt-dlp
    ```
 
 2. **Download and run**
