@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kurodaze/togewire/internal/cache"
 	"github.com/kurodaze/togewire/internal/types"
 
 	"github.com/gorilla/websocket"
@@ -550,15 +551,11 @@ func (s *Server) isValidAudioFile(filePath string) bool {
 	}
 
 	// Check file extension
-	allowedExt := []string{".opus", ".webm", ".ogg", ".m4a", ".mp4", ".mkv"}
-	ext := strings.ToLower(filepath.Ext(filePath))
-
-	for _, allowed := range allowedExt {
-		if ext == allowed {
-			return true
-		}
+	ext := filepath.Ext(filePath)
+	if !cache.IsValidAudioExtension(ext) {
+		log.Printf("Security: Invalid file extension: %s", ext)
+		return false
 	}
 
-	log.Printf("Security: Invalid file extension: %s", ext)
-	return false
+	return true
 }

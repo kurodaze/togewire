@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,17 @@ type Stats struct {
 }
 
 var validExtensions = []string{".opus", ".webm", ".ogg", ".m4a", ".mp4", ".mkv"}
+
+// IsValidAudioExtension checks if a file extension is valid for audio files
+func IsValidAudioExtension(ext string) bool {
+	ext = strings.ToLower(ext)
+	for _, valid := range validExtensions {
+		if ext == valid {
+			return true
+		}
+	}
+	return false
+}
 
 // create new cache manager
 func New() *Manager {
@@ -144,8 +156,28 @@ func (m *Manager) Remove(key string) {
 	delete(m.entries, key)
 }
 
+// removes entries for files that no longer exist on disk
+func (m *Manager) cleanupStaleEntries() {
+	m.mu.Lock()
+	staleCount := 0
+	for key, entry := range m.entries {
+		if _, err := os.Stat(entry.FilePath); os.IsNotExist(err) {
+			delete(m.entries, key)
+			staleCount++
+		}
+	}
+	m.mu.Unlock()
+
+	if staleCount > 0 {
+		m.save()
+		log.Printf("Cleaned up %d stale cache entries", staleCount)
+	}
+}
+
 // returns cache statistics
 func (m *Manager) GetStats() Stats {
+	m.cleanupStaleEntries()
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -305,41 +337,17 @@ func (m *Manager) CleanupIfNeeded() {
 		for _, key := range removedKeys {
 			delete(m.entries, key)
 		}
-
-		// Clean up stale entries where file no longer exists
-		existingFiles := make(map[string]bool)
-		for _, f := range files {
-			existingFiles[f.path] = true
-		}
-
-		staleCount := 0
-		for key, entry := range m.entries {
-			if entry.FilePath != "" && !existingFiles[entry.FilePath] {
-				if _, err := os.Stat(entry.FilePath); os.IsNotExist(err) {
-					delete(m.entries, key)
-					staleCount++
-				}
-			}
-		}
 		m.mu.Unlock()
 
 		m.save()
 
 		freedMB := (totalSize - currentSize) / (1024 * 1024)
-		if staleCount > 0 {
-			log.Printf("LRU cleanup complete: %d files removed, %d stale entries cleaned (freed %d MB)",
-				removedCount, staleCount, freedMB)
-		} else {
-			log.Printf("LRU cleanup complete: %d files removed (freed %d MB)",
-				removedCount, freedMB)
-		}
-	}
-}
+		log.Printf("LRU cleanup complete: %d files removed (freed %d MB)",
+			removedCount, freedMB)
 
-// FileExists checks if a file exists
-func (m *Manager) FileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+		// Clean up any stale entries
+		m.cleanupStaleEntries()
+	}
 }
 
 // FindDownloadedFile finds a downloaded file by video ID
