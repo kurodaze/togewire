@@ -161,7 +161,7 @@ func (m *Manager) cleanupStaleEntries() {
 	m.mu.Lock()
 	staleCount := 0
 	for key, entry := range m.entries {
-		if _, err := os.Stat(entry.FilePath); os.IsNotExist(err) {
+		if entry.FilePath == "" || !fileExists(entry.FilePath) {
 			delete(m.entries, key)
 			staleCount++
 		}
@@ -172,6 +172,12 @@ func (m *Manager) cleanupStaleEntries() {
 		m.save()
 		log.Printf("Cleaned up %d stale cache entries", staleCount)
 	}
+}
+
+// fileExists checks if a file exists
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // returns cache statistics
