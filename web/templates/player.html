@@ -178,11 +178,38 @@
             } else {
                 player.style.display = 'none';
             }
+            
+            // Clean up audio and state when hiding
             if (isListening) stopListen();
+            
+            // Also clean up any pending audio requests
+            cleanupAudioStream();
         }
 
         function updateDisplay(data) {
-            if (!data?.track || (!data.isPlaying && !data.audio_ready)) {
+            // Hide player if:
+            // 1. No track data (nothing playing on Spotify)
+            // 2. Track exists but paused AND no audio ready
+            if (!data?.track) {
+                // Clear timers
+                if (pauseTimer) {
+                    clearTimeout(pauseTimer);
+                    pauseTimer = null;
+                }
+                if (progressTimer) {
+                    clearInterval(progressTimer);
+                    progressTimer = null;
+                }
+                
+                // Reset state when track becomes null
+                requestingTrackId = null;
+                
+                hidePlayer();
+                return;
+            }
+            
+            // Also hide if paused and no audio is ready
+            if (!data.isPlaying && !data.audio_ready) {
                 // Clear timers
                 if (pauseTimer) {
                     clearTimeout(pauseTimer);

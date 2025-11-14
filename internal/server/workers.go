@@ -120,6 +120,10 @@ func (s *Server) handleTrackChange(track *types.Track, state *types.SpotifyState
 	s.broadcastTrackUpdate(state, true)
 
 	if track == nil {
+		// Nothing playing - clear next song preparation as well
+		s.stateMu.Lock()
+		s.nextSong = nil
+		s.stateMu.Unlock()
 		return
 	}
 
