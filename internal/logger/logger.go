@@ -51,7 +51,7 @@ func Debug(format string, v ...interface{}) {
 	mu.RLock()
 	defer mu.RUnlock()
 	if currentLevel <= DEBUG {
-		log.Output(2, fmt.Sprintf("[DEBUG] "+format, v...))
+		_ = log.Output(2, fmt.Sprintf("[DEBUG] "+format, v...))
 	}
 }
 
@@ -60,7 +60,7 @@ func Info(format string, v ...interface{}) {
 	mu.RLock()
 	defer mu.RUnlock()
 	if currentLevel <= INFO {
-		log.Output(2, fmt.Sprintf(format, v...))
+		_ = log.Output(2, fmt.Sprintf(format, v...))
 	}
 }
 
@@ -69,7 +69,7 @@ func Warn(format string, v ...interface{}) {
 	mu.RLock()
 	defer mu.RUnlock()
 	if currentLevel <= WARN {
-		log.Output(2, fmt.Sprintf("[WARN] "+format, v...))
+		_ = log.Output(2, fmt.Sprintf("[WARN] "+format, v...))
 	}
 }
 
@@ -78,22 +78,22 @@ func Error(format string, v ...interface{}) {
 	mu.RLock()
 	defer mu.RUnlock()
 	if currentLevel <= ERROR {
-		log.Output(2, fmt.Sprintf("[ERROR] "+format, v...))
+		_ = log.Output(2, fmt.Sprintf("[ERROR] "+format, v...))
 	}
 }
 
 // Fatal logs a fatal error and exits
 func Fatal(format string, v ...interface{}) {
-	log.Output(2, fmt.Sprintf("[FATAL] "+format, v...))
+	_ = log.Output(2, fmt.Sprintf("[FATAL] "+format, v...))
 	os.Exit(1)
 }
 
 // Print logs without level prefix (for banner, etc)
 func Print(v ...interface{}) {
-	log.Output(2, fmt.Sprint(v...))
+	_ = log.Output(2, fmt.Sprint(v...))
 }
 
 // Println logs without level prefix with newline
 func Println(v ...interface{}) {
-	log.Output(2, fmt.Sprintln(v...))
+	_ = log.Output(2, fmt.Sprintln(v...))
 }
