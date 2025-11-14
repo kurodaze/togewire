@@ -3,7 +3,6 @@ package cache
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kurodaze/togewire/internal/config"
+	"github.com/kurodaze/togewire/internal/logger"
 )
 
 const (
@@ -66,7 +66,7 @@ func New() *Manager {
 
 	// Create cache directory if it doesn't exist
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		log.Printf("Failed to create cache directory: %v", err)
+		logger.Info("Failed to create cache directory: %v", err)
 	}
 
 	m := &Manager{
@@ -87,10 +87,10 @@ func (m *Manager) load() {
 	}
 
 	if err := json.Unmarshal(data, &m.entries); err != nil {
-		log.Printf("Error loading cache metadata: %v", err)
+		logger.Error(" loading cache metadata: %v", err)
 		m.entries = make(map[string]*Entry)
 	} else {
-		log.Printf("Loaded %d cached songs", len(m.entries))
+		logger.Info("Loaded %d cached songs", len(m.entries))
 	}
 }
 
@@ -101,12 +101,12 @@ func (m *Manager) save() {
 
 	data, err := json.MarshalIndent(m.entries, "", "  ")
 	if err != nil {
-		log.Printf("Error marshaling cache metadata: %v", err)
+		logger.Error(" marshaling cache metadata: %v", err)
 		return
 	}
 
 	if err := os.WriteFile(m.cacheFile, data, 0644); err != nil {
-		log.Printf("Error saving cache metadata: %v", err)
+		logger.Error(" saving cache metadata: %v", err)
 	}
 }
 
@@ -170,7 +170,7 @@ func (m *Manager) cleanupStaleEntries() {
 
 	if staleCount > 0 {
 		m.save()
-		log.Printf("Cleaned up %d stale cache entries", staleCount)
+		logger.Info("Cleaned up %d stale cache entries", staleCount)
 	}
 }
 
@@ -242,14 +242,14 @@ func (m *Manager) Clear() error {
 
 		for _, file := range files {
 			if err := os.Remove(file); err != nil {
-				log.Printf("Failed to remove cached file %s: %v", file, err)
+				logger.Info("Failed to remove cached file %s: %v", file, err)
 			} else {
 				removedCount++
 			}
 		}
 	}
 
-	log.Printf("Cache cleared: %d files removed", removedCount)
+	logger.Info("Cache cleared: %d files removed", removedCount)
 	return nil
 }
 
@@ -267,7 +267,7 @@ func (m *Manager) CleanupIfNeeded() {
 		return // Under limit
 	}
 
-	log.Printf("Cache cleanup (LRU): %d MB exceeds %d MB limit",
+	logger.Info("Cache cleanup (LRU): %d MB exceeds %d MB limit",
 		totalSize/(1024*1024), cfg.CacheMaxSizeMB)
 
 	// Build list of files sorted by LRU
@@ -332,7 +332,7 @@ func (m *Manager) CleanupIfNeeded() {
 			// Log with last access time
 			lastAccess := time.Unix(file.lastAccessedAt, 0)
 			daysSinceAccess := time.Since(lastAccess).Hours() / 24
-			log.Printf("Removed (LRU): %s (last played %.1f days ago)",
+			logger.Info("Removed (LRU): %s (last played %.1f days ago)",
 				filepath.Base(file.path), daysSinceAccess)
 		}
 	}
@@ -348,7 +348,7 @@ func (m *Manager) CleanupIfNeeded() {
 		m.save()
 
 		freedMB := (totalSize - currentSize) / (1024 * 1024)
-		log.Printf("LRU cleanup complete: %d files removed (freed %d MB)",
+		logger.Info("LRU cleanup complete: %d files removed (freed %d MB)",
 			removedCount, freedMB)
 
 		// Clean up any stale entries

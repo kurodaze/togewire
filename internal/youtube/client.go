@@ -3,7 +3,6 @@ package youtube
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kurodaze/togewire/internal/cache"
+	"github.com/kurodaze/togewire/internal/logger"
 	"github.com/kurodaze/togewire/internal/types"
 )
 
@@ -115,7 +115,7 @@ func (c *Client) PrepareTrack(track *types.Track) (string, error) {
 	}
 
 	if cached, exists := c.cache.Get(cacheKey); exists {
-		log.Printf("Cache hit: %s - %s", track.Name, track.Artist)
+		logger.Debug("Cache hit: %s - %s", track.Name, track.Artist)
 
 		// Update last accessed time for LRU tracking
 		c.cache.MarkAccessed(cacheKey)
@@ -125,7 +125,7 @@ func (c *Client) PrepareTrack(track *types.Track) (string, error) {
 	videoID, queryType, err := c.searchYoutube(track)
 	if err != nil {
 		c.failed.Store(trackKey, true)
-		log.Printf("Failed (won't retry): %s - %s", track.Name, track.Artist)
+		logger.Warn("Failed (won't retry): %s - %s", track.Name, track.Artist)
 		return "", fmt.Errorf("search failed: %w", err)
 	}
 
@@ -196,20 +196,20 @@ func (c *Client) searchWithQuery(query SearchQuery, track *types.Track) (string,
 			// Retry after successful update
 			return c.searchWithQuery(query, track)
 		}
-		log.Printf("%sNo results for %s query%s", query.Color, query.Type, ColorReset)
+		logger.Debug("%sNo results for %s query%s", query.Color, query.Type, ColorReset)
 		return "", fmt.Errorf("search command failed: %w", err)
 	}
 
 	mgr.ResetFailures()
 
 	if parseErr != nil || len(results) == 0 {
-		log.Printf("%sNo valid results for %s query%s", query.Color, query.Type, ColorReset)
+		logger.Debug("%sNo valid results for %s query%s", query.Color, query.Type, ColorReset)
 		return "", fmt.Errorf("no valid results")
 	}
 
-	log.Printf("%sFound %d results (%s query)%s", query.Color, len(results), query.Type, ColorReset)
+	logger.Debug("%sFound %d results (%s query)%s", query.Color, len(results), query.Type, ColorReset)
 	for i, result := range results {
-		log.Printf("%s  %d. '%s' by %s%s", query.Color, i+1, result.Title, result.Uploader, ColorReset)
+		logger.Debug("%s  %d. '%s' by %s%s", query.Color, i+1, result.Title, result.Uploader, ColorReset)
 	}
 
 	bestMatch := c.findBestMatch(results, track, query)
@@ -345,7 +345,7 @@ func (c *Client) findBestMatch(results []*SearchResult, track *types.Track, quer
 	}
 
 	if len(matches) == 0 {
-		log.Printf("%sNo valid matches found%s", query.Color, ColorReset)
+		logger.Debug("%sNo valid matches found%s", query.Color, ColorReset)
 		return nil
 	}
 
@@ -360,12 +360,12 @@ func (c *Client) findBestMatch(results []*SearchResult, track *types.Track, quer
 	}
 
 	if best.score >= minScore {
-		log.Printf("%sChosen result: [%d] %s (score: %d)%s",
+		logger.Debug("%sChosen result: [%d] %s (score: %d)%s",
 			query.Color, best.index+1, strings.Join(best.reasons, " + "), best.score, ColorReset)
 		return best.result
 	}
 
-	log.Printf("%sScore too low: %d for '%s'%s",
+	logger.Debug("%sScore too low: %d for '%s'%s",
 		query.Color, best.score, best.result.Title, ColorReset)
 	return nil
 }
@@ -453,7 +453,7 @@ func (c *Client) downloadAndCacheTrack(track *types.Track, videoID, queryType st
 		filePath, err := c.tryDownloadMethod(videoID, method.format, method.name)
 		if err != nil {
 			lastErr = err
-			log.Printf("Method %s failed: %v", method.name, err)
+			logger.Debug("Method %s failed: %v", method.name, err)
 			continue
 		}
 
@@ -483,7 +483,7 @@ func (c *Client) downloadAndCacheTrack(track *types.Track, videoID, queryType st
 		c.lastDownloadTime = time.Now()
 		c.downloadTimeMu.Unlock()
 
-		log.Printf("Downloaded [%s/%s]: %s",
+		logger.Debug("Downloaded [%s/%s]: %s",
 			method.name, queryType, filepath.Base(filePath))
 
 		return filepath.Abs(filePath)
@@ -542,18 +542,18 @@ func (c *Client) ClearCache() error {
 // UpgradeTrack attempts to re-download a track with best_audio method
 // Returns nil without error if upgrade fails (keeps existing lower quality)
 func (c *Client) UpgradeTrack(cacheKey string, entry *cache.Entry) error {
-	log.Printf("Upgrading track quality: %s (from %s to best_audio)", entry.Title, entry.DownloadMethod)
+	logger.Debug("Upgrading track quality: %s (from %s to best_audio)", entry.Title, entry.DownloadMethod)
 
 	// Try to download with best_audio only (don't remove old file yet)
 	filePath, err := c.tryDownloadMethod(entry.VideoID, "ba", "best_audio")
 	if err != nil {
-		log.Printf("Could not upgrade track, keeping %s quality: %s", entry.DownloadMethod, entry.Title)
+		logger.Warn("Could not upgrade track, keeping %s quality: %s", entry.DownloadMethod, entry.Title)
 		return nil // Return nil to skip, not an error
 	}
 
 	// Success - remove old file
 	if err := os.Remove(entry.FilePath); err != nil {
-		log.Printf("Warning: Failed to remove old file: %v", err)
+		logger.Warn("Failed to remove old file: %v", err)
 	}
 
 	// Update cache entry
@@ -574,7 +574,7 @@ func (c *Client) UpgradeTrack(cacheKey string, entry *cache.Entry) error {
 	c.lastDownloadTime = time.Now()
 	c.downloadTimeMu.Unlock()
 
-	log.Printf("Successfully upgraded: %s", entry.Title)
+	logger.Debug("Successfully upgraded: %s", entry.Title)
 	return nil
 }
 

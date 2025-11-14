@@ -3,7 +3,6 @@ package youtube
 import (
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kurodaze/togewire/internal/logger"
 )
 
 const (
@@ -37,7 +38,7 @@ func GetYtdlpManager() *YtdlpManager {
 	ytdlpManagerOnce.Do(func() {
 		binDir := filepath.Join(".", "bin")
 		if err := os.MkdirAll(binDir, 0755); err != nil {
-			log.Printf("Failed to create bin directory: %v", err)
+			logger.Info("Failed to create bin directory: %v", err)
 		}
 
 		ytdlpManager = &YtdlpManager{
@@ -47,7 +48,7 @@ func GetYtdlpManager() *YtdlpManager {
 
 		// Initialize yt-dlp
 		if err := ytdlpManager.ensureYtdlp(); err != nil {
-			log.Printf("Failed to initialize yt-dlp: %v", err)
+			logger.Info("Failed to initialize yt-dlp: %v", err)
 		}
 	})
 	return ytdlpManager
@@ -70,17 +71,17 @@ func (m *YtdlpManager) ensureYtdlp() error {
 	defer m.mu.Unlock()
 
 	if !fileExists(m.binPath) {
-		log.Println("yt-dlp not found, downloading...")
+		logger.Debug("yt-dlp not found, downloading...")
 		if err := m.downloadYtdlp(); err != nil {
-			log.Printf("Failed to download yt-dlp: %v", err)
+			logger.Info("Failed to download yt-dlp: %v", err)
 			return m.trySystemYtdlp()
 		}
 	}
 
 	if m.shouldUpdate() {
-		log.Println("Checking for yt-dlp updates...")
+		logger.Debug("Checking for yt-dlp updates...")
 		if err := m.updateYtdlp(); err != nil {
-			log.Printf("Update check failed: %v", err)
+			logger.Info("Update check failed: %v", err)
 		}
 	}
 
@@ -93,7 +94,7 @@ func (m *YtdlpManager) trySystemYtdlp() error {
 		return fmt.Errorf("managed yt-dlp download failed and system yt-dlp not found: %w", err)
 	}
 
-	log.Printf("Using system yt-dlp at: %s", systemPath)
+	logger.Debug("Using system yt-dlp at: %s", systemPath)
 	m.binPath = systemPath
 	return nil
 }
@@ -113,13 +114,13 @@ func (m *YtdlpManager) HandleFailure(err error) error {
 		return err
 	}
 
-	log.Println("Multiple yt-dlp failures, attempting auto-update...")
+	logger.Info("Multiple yt-dlp failures, attempting auto-update...")
 	if updateErr := m.updateYtdlp(); updateErr != nil {
 		return fmt.Errorf("original error: %v, update failed: %v", err, updateErr)
 	}
 
 	m.failureCount = 0
-	log.Println("yt-dlp updated, retrying...")
+	logger.Info("yt-dlp updated, retrying...")
 	return nil
 }
 
@@ -132,7 +133,7 @@ func (m *YtdlpManager) ResetFailures() {
 func (m *YtdlpManager) ForceUpdate() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	log.Println("Forcing yt-dlp update...")
+	logger.Info("Forcing yt-dlp update...")
 	return m.updateYtdlp()
 }
 
@@ -172,24 +173,24 @@ func (m *YtdlpManager) downloadYtdlp() error {
 	}
 
 	m.markUpdated()
-	log.Println("yt-dlp downloaded successfully")
+	logger.Debug("yt-dlp downloaded successfully")
 	return nil
 }
 
 func (m *YtdlpManager) updateYtdlp() error {
 	if m.isSystemYtdlp() {
-		log.Println("Using system yt-dlp, skipping update")
+		logger.Debug("Using system yt-dlp, skipping update")
 		m.markUpdated()
 		return nil
 	}
 
 	if err := exec.Command(m.binPath, "-U").Run(); err == nil {
 		m.markUpdated()
-		log.Println("yt-dlp updated via self-update")
+		logger.Debug("yt-dlp updated via self-update")
 		return nil
 	}
 
-	log.Println("Self-update failed, downloading fresh binary...")
+	logger.Info("Self-update failed, downloading fresh binary...")
 	return m.downloadYtdlp()
 }
 
@@ -210,7 +211,7 @@ func (m *YtdlpManager) shouldUpdate() bool {
 func (m *YtdlpManager) markUpdated() {
 	checkFile := filepath.Join(m.binDir, updateCheckFile)
 	if err := os.WriteFile(checkFile, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
-		log.Printf("Failed to write update check file: %v", err)
+		logger.Info("Failed to write update check file: %v", err)
 	}
 }
 

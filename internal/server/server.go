@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
-	"log"
+
+	"github.com/kurodaze/togewire/internal/logger"
+
 	"net/http"
 	"sync"
 	"time"
@@ -195,7 +197,7 @@ func (s *Server) startBackgroundWorkers() {
 	// tries to upgrade low-quality tracks when idle
 	go s.idleOptimizationWorker()
 
-	log.Println("Background workers started")
+	logger.Debug("Background workers started")
 }
 
 // Run starts the HTTP server
@@ -203,7 +205,7 @@ func (s *Server) Run() error {
 	cfg := config.Get()
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 
-	log.Printf("Server starting on http://%s", addr)
+	logger.Info("Server starting on http://%s", addr)
 
 	return s.router.Run(addr)
 }
@@ -220,7 +222,7 @@ func (s *Server) Shutdown() {
 	}
 	s.clientsMu.Unlock()
 
-	log.Println("Server shutdown complete")
+	logger.Info("Server shutdown complete")
 }
 
 // securityHeaders middleware adds security headers
@@ -250,7 +252,7 @@ func (s *Server) securityHeaders() gin.HandlerFunc {
 func (s *Server) handleWebSocket(c *gin.Context) {
 	conn, err := s.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Printf("WebSocket upgrade failed: %v", err)
+		logger.Info("WebSocket upgrade failed: %v", err)
 		return
 	}
 
@@ -536,7 +538,7 @@ func (s *Server) handleAdminSetupPost(c *gin.Context) {
 	redirectURI := fmt.Sprintf("%s://%s/callback", scheme, c.Request.Host)
 
 	if err := cfg.UpdateSpotifyCredentials(clientID, clientSecret, redirectURI); err != nil {
-		log.Printf("Failed to save Spotify credentials: %v", err)
+		logger.Info("Failed to save Spotify credentials: %v", err)
 		c.Redirect(http.StatusFound, "/?error=Failed to save credentials")
 		return
 	}
@@ -544,7 +546,7 @@ func (s *Server) handleAdminSetupPost(c *gin.Context) {
 	// Update the Spotify client with new credentials
 	s.spotifyClient.UpdateCredentials(clientID, clientSecret, redirectURI)
 
-	log.Println("Spotify credentials configured")
+	logger.Info("Spotify credentials configured")
 
 	// Redirect to Spotify OAuth
 	c.Redirect(http.StatusFound, "/auth/spotify")
@@ -564,12 +566,12 @@ func (s *Server) handleSpotifyCallback(c *gin.Context) {
 	}
 
 	if err := s.spotifyClient.ExchangeCode(code); err != nil {
-		log.Printf("Failed to exchange authorization code: %v", err)
+		logger.Info("Failed to exchange authorization code: %v", err)
 		c.Redirect(http.StatusFound, "/?error=Failed to complete Spotify authentication")
 		return
 	}
 
-	log.Println("Authenticated with Spotify")
+	logger.Info("Authenticated with Spotify")
 
 	// Redirect to the main dashboard
 	c.Redirect(http.StatusFound, "/")

@@ -2,19 +2,17 @@ package main
 
 import (
 	"flag"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/kurodaze/togewire"
 	"github.com/kurodaze/togewire/internal/config"
+	"github.com/kurodaze/togewire/internal/logger"
 	"github.com/kurodaze/togewire/internal/server"
 )
 
 func main() {
-	// Configure logging with millisecond precision
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	banner := `
  ███████████    ███████      █████████  ██████████ █████   ███   █████ █████ ███████████   ██████████
 ░█░░░███░░░█  ███░░░░░███   ███░░░░░███░░███░░░░░█░░███   ░███  ░░███ ░░███ ░░███░░░░░███ ░░███░░░░░█
@@ -25,7 +23,7 @@ func main() {
     █████    ░░░███████░   ░░█████████  ██████████    ░░███ ░░███      █████ █████   █████ ██████████
    ░░░░░       ░░░░░░░      ░░░░░░░░░  ░░░░░░░░░░      ░░░   ░░░      ░░░░░ ░░░░░   ░░░░░ ░░░░░░░░░░ 
 `
-	log.Println(banner)
+	logger.Println(banner)
 
 	// Parse command line flags
 	var (
@@ -39,14 +37,18 @@ func main() {
 	cfg.Port = *port
 	cfg.Host = *host
 
+	// Initialize logger with configured level
+	logger.SetLevel(cfg.LogLevel)
+	cfg.Host = *host
+
 	// Generate and display one-time setup token if no password set
 	if !cfg.HasAdminPassword() {
 		token := server.GenerateSetupToken()
-		log.Println("")
-		log.Printf("   One-Time Setup Token: %s", token)
-		log.Println("")
-		log.Println("   This token is required to set your admin password.")
-		log.Println("")
+		logger.Println("")
+		logger.Info("   One-Time Setup Token: %s", token)
+		logger.Println("")
+		logger.Println("   This token is required to set your admin password.")
+		logger.Println("")
 	}
 
 	// Set embedded files for the server
@@ -61,13 +63,13 @@ func main() {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 
-		log.Println("Shutdown signal received...")
+		logger.Info("Shutdown signal received...")
 		srv.Shutdown()
 		os.Exit(0)
 	}()
 
 	// Start server
 	if err := srv.Run(); err != nil {
-		log.Fatalf("Server failed to start: %v", err)
+		logger.Fatal("Server failed to start: %v", err)
 	}
 }

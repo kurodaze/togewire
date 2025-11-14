@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+
+	"github.com/kurodaze/togewire/internal/logger"
+
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,11 +28,11 @@ func (c *Client) readPump() {
 
 	c.conn.SetReadLimit(maxMessageSize)
 	if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
-		log.Printf("WebSocket SetReadDeadline error: %v", err)
+		logger.Info("WebSocket SetReadDeadline error: %v", err)
 	}
 	c.conn.SetPongHandler(func(string) error {
 		if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
-			log.Printf("WebSocket pong SetReadDeadline error: %v", err)
+			logger.Info("WebSocket pong SetReadDeadline error: %v", err)
 		}
 		return nil
 	})
@@ -39,21 +41,21 @@ func (c *Client) readPump() {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket error: %v", err)
+				logger.Info("WebSocket error: %v", err)
 			}
 			break
 		}
 
 		// Validate message length
 		if len(message) > maxMessageSize {
-			log.Printf("WebSocket message too large: %d bytes", len(message))
+			logger.Info("WebSocket message too large: %d bytes", len(message))
 			continue
 		}
 
 		// Handle incoming messages
 		var msg map[string]interface{}
 		if err := json.Unmarshal(message, &msg); err != nil {
-			log.Printf("Failed to unmarshal WebSocket message: %v", err)
+			logger.Info("Failed to unmarshal WebSocket message: %v", err)
 			continue
 		}
 
@@ -73,26 +75,26 @@ func (c *Client) writePump() {
 		select {
 		case message, ok := <-c.send:
 			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				log.Printf("WebSocket SetWriteDeadline error: %v", err)
+				logger.Info("WebSocket SetWriteDeadline error: %v", err)
 			}
 			if !ok {
 				if err := c.conn.WriteMessage(websocket.CloseMessage, []byte{}); err != nil {
-					log.Printf("WebSocket write close error: %v", err)
+					logger.Info("WebSocket write close error: %v", err)
 				}
 				return
 			}
 
 			if err := c.conn.WriteJSON(message); err != nil {
-				log.Printf("WebSocket write error: %v", err)
+				logger.Info("WebSocket write error: %v", err)
 				return
 			}
 
 		case <-ticker.C:
 			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				log.Printf("WebSocket SetWriteDeadline error: %v", err)
+				logger.Info("WebSocket SetWriteDeadline error: %v", err)
 			}
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("WebSocket ping write error: %v", err)
+				logger.Info("WebSocket ping write error: %v", err)
 				return
 			}
 		}
@@ -114,7 +116,7 @@ func (c *Client) handleMessage(msg map[string]interface{}) {
 	case "stop_listening":
 		c.handleStopListening()
 	default:
-		log.Printf("Unknown WebSocket message type: %s", msgType)
+		logger.Info("Unknown WebSocket message type: %s", msgType)
 	}
 }
 
@@ -175,7 +177,7 @@ func (c *Client) handleStopListening() {
 			client.listeningMu.Unlock()
 		}
 		c.server.clientsMu.RUnlock()
-		log.Printf("%s stopped listening (listening: %d)", c.name, totalListening)
+		logger.Debug("%s stopped listening (listening: %d)", c.name, totalListening)
 
 		// Broadcast track update to refresh listener count for remaining clients
 		c.server.stateMu.RLock()
@@ -237,7 +239,7 @@ func (s *Server) joinAudioBroadcast(client *Client, filePath string, trackID str
 			c.listeningMu.Unlock()
 		}
 		s.clientsMu.RUnlock()
-		log.Printf("%s started listening (total: %d)", client.name, totalListening)
+		logger.Debug("%s started listening (total: %d)", client.name, totalListening)
 
 		// Broadcast track update to refresh listener count for all clients
 		s.stateMu.RLock()
@@ -281,7 +283,7 @@ func (s *Server) joinAudioBroadcast(client *Client, filePath string, trackID str
 	broadcast.started = true
 	broadcast.mu.Unlock()
 
-	log.Printf("Broadcasting to %d clients", clientCount)
+	logger.Debug("Broadcasting to %d clients", clientCount)
 	go s.runAudioBroadcast(broadcast)
 }
 
@@ -298,7 +300,7 @@ func (s *Server) runAudioBroadcast(broadcast *audioBroadcast) {
 	s.stateMu.RUnlock()
 
 	if broadcast.trackID != "" && currentTrackID != "" && broadcast.trackID != currentTrackID {
-		log.Printf("Aborting broadcast (track changed: %s -> %s)", broadcast.trackID, currentTrackID)
+		logger.Info("Aborting broadcast (track changed: %s -> %s)", broadcast.trackID, currentTrackID)
 		broadcast.mu.Lock()
 		broadcast.err = fmt.Errorf("track changed")
 		broadcast.complete = true
@@ -394,7 +396,7 @@ func (s *Server) runAudioBroadcast(broadcast *audioBroadcast) {
 	currentClientCount := len(broadcast.clients)
 	broadcast.mu.Unlock()
 
-	log.Printf("Processed %d bytes (%d chunks) to %d clients in %v",
+	logger.Debug("Processed %d bytes (%d chunks) to %d clients in %v",
 		totalBytes, chunkNum, currentClientCount, duration)
 
 	// Cleanup after a delay
@@ -419,7 +421,7 @@ func (s *Server) broadcastToClients(broadcast *audioBroadcast, msg types.WebSock
 		select {
 		case client.send <- msg:
 		case <-time.After(5 * time.Second):
-			log.Printf("%s not consuming, skipping", client.name)
+			logger.Info("%s not consuming, skipping", client.name)
 		}
 	}
 }
@@ -437,13 +439,13 @@ func (s *Server) replayBroadcast(client *Client, broadcast *audioBroadcast) {
 		select {
 		case client.send <- msg:
 		case <-time.After(5 * time.Second):
-			log.Printf("Replay timeout for %s", client.name)
+			logger.Info("Replay timeout for %s", client.name)
 			return
 		}
 	}
 
 	duration := time.Since(startTime)
-	log.Printf("Replayed %d chunks to 1 client in %v", len(chunks), duration)
+	logger.Info("Replayed %d chunks to 1 client in %v", len(chunks), duration)
 }
 
 // broadcastError sends an error to all clients in a broadcast
@@ -491,7 +493,7 @@ func (s *Server) unregisterClient(client *Client) {
 				}
 				c.listeningMu.Unlock()
 			}
-			log.Printf("%s disconnected (listening: %d)", client.name, totalListening)
+			logger.Debug("%s disconnected (listening: %d)", client.name, totalListening)
 
 			// Broadcast track update to refresh listener count for remaining clients
 			s.stateMu.RLock()
@@ -519,7 +521,7 @@ func (s *Server) isValidAudioFile(filePath string) bool {
 	cacheDir := filepath.Join("data", "youtube_cache")
 	absCacheDir, err := filepath.Abs(cacheDir)
 	if err != nil {
-		log.Printf("Security: Failed to resolve cache directory: %v", err)
+		logger.Info("Security: Failed to resolve cache directory: %v", err)
 		return false
 	}
 
@@ -527,14 +529,14 @@ func (s *Server) isValidAudioFile(filePath string) bool {
 	cleanPath := filepath.Clean(filePath)
 	absFilePath, err := filepath.Abs(cleanPath)
 	if err != nil {
-		log.Printf("Security: Failed to resolve file path: %v", err)
+		logger.Info("Security: Failed to resolve file path: %v", err)
 		return false
 	}
 
 	// Use filepath.Rel to ensure no directory traversal
 	rel, err := filepath.Rel(absCacheDir, absFilePath)
 	if err != nil || strings.HasPrefix(rel, "..") {
-		log.Printf("Security: Path outside cache directory")
+		logger.Info("Security: Path outside cache directory")
 		return false
 	}
 
@@ -546,14 +548,14 @@ func (s *Server) isValidAudioFile(filePath string) bool {
 
 	// Block symlinks
 	if info.Mode()&os.ModeSymlink != 0 {
-		log.Printf("Security: Symlinks not allowed")
+		logger.Info("Security: Symlinks not allowed")
 		return false
 	}
 
 	// Check file extension
 	ext := filepath.Ext(filePath)
 	if !cache.IsValidAudioExtension(ext) {
-		log.Printf("Security: Invalid file extension: %s", ext)
+		logger.Info("Security: Invalid file extension: %s", ext)
 		return false
 	}
 

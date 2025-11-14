@@ -2,10 +2,10 @@ package server
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/kurodaze/togewire/internal/config"
+	"github.com/kurodaze/togewire/internal/logger"
 	"github.com/kurodaze/togewire/internal/types"
 )
 
@@ -13,13 +13,13 @@ import (
 func (s *Server) spotifyMonitorWorker() {
 	cfg := config.Get()
 	if !cfg.IsAuthenticated() {
-		log.Println("Waiting for Spotify authentication...")
+		logger.Info("Waiting for Spotify authentication...")
 		for !cfg.IsAuthenticated() {
 			time.Sleep(5 * time.Second)
 		}
 	}
 
-	log.Println("Spotify monitoring started")
+	logger.Debug("Spotify monitoring started")
 
 	var lastTrackID string
 	var lastPlayingState bool
@@ -36,7 +36,7 @@ func (s *Server) spotifyMonitorWorker() {
 		// Get current song
 		state, err := s.spotifyClient.GetCurrentSong()
 		if err != nil {
-			log.Printf("Spotify monitor error: %v", err)
+			logger.Info("Spotify monitor error: %v", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -66,7 +66,7 @@ func (s *Server) spotifyMonitorWorker() {
 
 		// Handle track changes
 		if trackID != lastTrackID {
-			log.Printf("Now playing: %s - %s", state.Track.Artist, state.Track.Name)
+			logger.Info("Now playing: %s - %s", state.Track.Artist, state.Track.Name)
 			s.handleTrackChange(state.Track, state)
 			lastTrackID = trackID
 			lastQueueCheck = currentTime.Add(-10 * time.Second) // Force queue check
@@ -134,7 +134,7 @@ func (s *Server) handleTrackChange(track *types.Track, state *types.SpotifyState
 
 	if nextSong != nil && nextSong.Track.ID == track.ID {
 		// Use prepared track
-		log.Printf("Using cached track: %s - %s", track.Artist, track.Name)
+		logger.Debug("Using cached track: %s - %s", track.Artist, track.Name)
 
 		s.stateMu.Lock()
 		s.listenAlong.AudioURL = fmt.Sprintf("file://%s", nextSong.FilePath)
@@ -149,12 +149,12 @@ func (s *Server) handleTrackChange(track *types.Track, state *types.SpotifyState
 
 	// Prepare current track in background goroutine for minimal blocking
 	// Uses cached state to avoid 500ms Spotify API delay on broadcast
-	log.Printf("Preparing: %s - %s", track.Artist, track.Name)
+	logger.Debug("Preparing: %s - %s", track.Artist, track.Name)
 
 	go func(currentState *types.SpotifyState) {
 		filePath, err := s.youtubeClient.PrepareTrack(track)
 		if err != nil {
-			log.Printf("Failed to prepare track: %v", err)
+			logger.Info("Failed to prepare track: %v", err)
 
 			// Broadcast error state if track is still current
 			s.stateMu.RLock()
@@ -179,11 +179,11 @@ func (s *Server) handleTrackChange(track *types.Track, state *types.SpotifyState
 		s.stateMu.Unlock()
 
 		if !stillCurrent {
-			log.Printf("Track changed during download: %s - %s", track.Artist, track.Name)
+			logger.Info("Track changed during download: %s - %s", track.Artist, track.Name)
 			return
 		}
 
-		log.Printf("Audio ready: %s - %s", track.Artist, track.Name)
+		logger.Debug("Audio ready: %s - %s", track.Artist, track.Name)
 
 		// Broadcast with cached state (no Spotify API delay)
 		s.broadcastTrackUpdate(currentState, false)
@@ -215,7 +215,7 @@ func (s *Server) checkQueueForNextTrack() {
 	}
 
 	// Only log when queue actually changes to a different track
-	log.Printf("Queue: next track %s - %s", nextTrack.Artist, nextTrack.Name)
+	logger.Debug("Queue: next track %s - %s", nextTrack.Artist, nextTrack.Name)
 
 	go s.prepareNextTrack(&nextTrack)
 }
@@ -236,14 +236,14 @@ func (s *Server) prepareNextTrack(track *types.Track) {
 	}
 	s.stateMu.RUnlock()
 
-	log.Printf("Preparing next track: %s - %s", track.Artist, track.Name)
+	logger.Debug("Preparing next track: %s - %s", track.Artist, track.Name)
 
 	bgPrepStart := time.Now()
 	filePath, err := s.youtubeClient.PrepareTrack(track)
 	bgPrepDuration := time.Since(bgPrepStart)
 
 	if err != nil {
-		log.Printf("Failed to prepare next track: %v", err)
+		logger.Info("Failed to prepare next track: %v", err)
 		return
 	}
 
@@ -259,7 +259,7 @@ func (s *Server) prepareNextTrack(track *types.Track) {
 		}
 		s.stateMu.Unlock()
 
-		log.Printf("Next track ready: %s - %s (took %v)", track.Artist, track.Name, bgPrepDuration)
+		logger.Debug("Next track ready: %s - %s (took %v)", track.Artist, track.Name, bgPrepDuration)
 	} else {
 		// Check if it became current track (without expensive API call)
 		s.stateMu.Lock()
@@ -269,11 +269,11 @@ func (s *Server) prepareNextTrack(track *types.Track) {
 			state := s.currentSong // Use cached state
 			s.stateMu.Unlock()
 
-			log.Printf("Background prep completed: %s - %s", track.Artist, track.Name)
+			logger.Debug("Background prep completed: %s - %s", track.Artist, track.Name)
 			s.broadcastTrackUpdate(state, false)
 		} else {
 			s.stateMu.Unlock()
-			log.Printf("Track no longer relevant: %s - %s", track.Artist, track.Name)
+			logger.Debug("Track no longer relevant: %s - %s", track.Artist, track.Name)
 		}
 	}
 }
@@ -320,7 +320,7 @@ func (s *Server) broadcastTrackUpdateWithError(state *types.SpotifyState, trackC
 	select {
 	case s.broadcast <- msg:
 	default:
-		log.Println("Warning: Broadcast channel full")
+		logger.Info("Warning: Broadcast channel full")
 	}
 }
 
@@ -330,7 +330,7 @@ func (s *Server) idleOptimizationWorker() {
 	const maxUpgradesPerRun = 10
 	const checkInterval = 5 * time.Minute
 
-	log.Println("Idle optimization worker started")
+	logger.Debug("Idle optimization worker started")
 
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
@@ -366,13 +366,13 @@ func (s *Server) idleOptimizationWorker() {
 
 		case <-upgradeTimer.C:
 			if s.youtubeClient.IsCurrentlyDownloading() {
-				log.Println("Download activity detected, skipping upgrade cycle")
+				logger.Info("Download activity detected, skipping upgrade cycle")
 				continue
 			}
 
 			timeSinceDownload := s.youtubeClient.GetTimeSinceLastDownload()
 			if timeSinceDownload < idleThreshold {
-				log.Println("Recent download activity detected, skipping upgrade cycle")
+				logger.Info("Recent download activity detected, skipping upgrade cycle")
 				continue
 			}
 
@@ -384,7 +384,7 @@ func (s *Server) idleOptimizationWorker() {
 			totalTracks := len(needsUpgrade)
 			upgradeCount := min(totalTracks, maxUpgradesPerRun)
 
-			log.Printf("yt-dlp idle for %v, upgrading up to %d low-quality tracks (from %d total)...",
+			logger.Info("yt-dlp idle for %v, upgrading up to %d low-quality tracks (from %d total)...",
 				timeSinceDownload.Round(time.Minute), upgradeCount, totalTracks)
 
 			upgraded := 0
@@ -396,7 +396,7 @@ func (s *Server) idleOptimizationWorker() {
 				}
 
 				if s.youtubeClient.IsCurrentlyDownloading() {
-					log.Printf("Download activity detected, pausing optimization (upgraded %d, skipped %d)", upgraded, skipped)
+					logger.Info("Download activity detected, pausing optimization (upgraded %d, skipped %d)", upgraded, skipped)
 					upgradeTimer.Stop()
 					break
 				}
@@ -413,13 +413,13 @@ func (s *Server) idleOptimizationWorker() {
 			}
 
 			if upgraded > 0 || skipped > 0 {
-				log.Printf("Optimization cycle complete: upgraded %d tracks, skipped %d", upgraded, skipped)
+				logger.Info("Optimization cycle complete: upgraded %d tracks, skipped %d", upgraded, skipped)
 			}
 
 			// Check if there are still tracks needing upgrade
 			remainingUpgrades := s.youtubeClient.GetEntriesNeedingUpgrade()
 			if len(remainingUpgrades) > 0 && !s.youtubeClient.IsCurrentlyDownloading() {
-				log.Printf("%d tracks still need upgrade, scheduling next cycle in %v",
+				logger.Info("%d tracks still need upgrade, scheduling next cycle in %v",
 					len(remainingUpgrades), idleThreshold)
 				upgradeTimer.Reset(idleThreshold)
 			}

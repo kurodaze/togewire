@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"sync"
 
@@ -67,11 +66,14 @@ func (c *Config) load() {
 	// Override with environment variables
 	if port := os.Getenv("PORT"); port != "" {
 		if _, err := fmt.Sscanf(port, "%d", &c.Port); err != nil {
-			log.Printf("invalid PORT value %q: %v", port, err)
+			fmt.Fprintf(os.Stderr, "invalid PORT value %q: %v\n", port, err)
 		}
 	}
 	if host := os.Getenv("HOST"); host != "" {
 		c.Host = host
+	}
+	if logLevel := os.Getenv("LOG_LEVEL"); logLevel != "" {
+		c.LogLevel = logLevel
 	}
 	if clientID := os.Getenv("SPOTIFY_CLIENT_ID"); clientID != "" {
 		c.SpotifyClientID = clientID
@@ -84,7 +86,7 @@ func (c *Config) load() {
 	if c.SessionSecret == "" {
 		c.SessionSecret = generateRandomSecret()
 		if err := c.Save(); err != nil {
-			log.Printf("failed to save config: %v", err)
+			fmt.Fprintf(os.Stderr, "failed to save config: %v\n", err)
 		}
 	}
 }
