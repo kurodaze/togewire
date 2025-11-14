@@ -288,6 +288,15 @@
             }
 
             const truncatedArtist = truncateText(track.artist);
+            
+            // Handle error state
+            if (data.error) {
+                nowPlaying.textContent = data.error;
+                listenBtn.style.display = 'none';
+                updateTooltip();
+                return;
+            }
+            
             if (!data.track_changed || !isListening) {
                 nowPlaying.textContent = `Listening to ${truncatedArtist}`;
             }

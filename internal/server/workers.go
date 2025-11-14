@@ -155,6 +155,16 @@ func (s *Server) handleTrackChange(track *types.Track, state *types.SpotifyState
 		filePath, err := s.youtubeClient.PrepareTrack(track)
 		if err != nil {
 			log.Printf("Failed to prepare track: %v", err)
+
+			// Broadcast error state if track is still current
+			s.stateMu.RLock()
+			stillCurrent := s.currentSong != nil && s.currentSong.Track != nil &&
+				s.currentSong.Track.ID == track.ID
+			s.stateMu.RUnlock()
+
+			if stillCurrent {
+				s.broadcastTrackUpdateWithError(currentState, false, "Audio not found")
+			}
 			return
 		}
 
@@ -270,6 +280,11 @@ func (s *Server) prepareNextTrack(track *types.Track) {
 
 // broadcastTrackUpdate broadcasts a track update to all clients
 func (s *Server) broadcastTrackUpdate(state *types.SpotifyState, trackChanged bool) {
+	s.broadcastTrackUpdateWithError(state, trackChanged, "")
+}
+
+// broadcastTrackUpdateWithError broadcasts a track update with optional error message
+func (s *Server) broadcastTrackUpdateWithError(state *types.SpotifyState, trackChanged bool, errorMsg string) {
 	if state == nil {
 		return
 	}
@@ -298,6 +313,7 @@ func (s *Server) broadcastTrackUpdate(state *types.SpotifyState, trackChanged bo
 			Duration:     duration,
 			AudioReady:   audioReady,
 			TrackChanged: trackChanged,
+			Error:        errorMsg,
 		},
 	}
 
