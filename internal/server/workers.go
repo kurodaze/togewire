@@ -298,6 +298,10 @@ func (s *Server) broadcastTrackUpdateWithError(state *types.SpotifyState, trackC
 
 	s.stateMu.RLock()
 	audioReady := s.listenAlong.AudioURL != ""
+	// If no error override provided, use the stored error state
+	if errorMsg == "" {
+		errorMsg = s.listenAlong.Error
+	}
 	s.stateMu.RUnlock()
 
 	var track *types.Track
