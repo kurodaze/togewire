@@ -74,6 +74,7 @@ type ListenAlongState struct {
 	Progress  int64     `json:"progress"`
 	IsPlaying bool      `json:"is_playing"`
 	LastSync  time.Time `json:"last_sync"`
+	Error     string    `json:"error,omitempty"` // Error message for failed tracks
 }
 
 type Client struct {
@@ -330,6 +331,7 @@ func (s *Server) sendCurrentState(client *Client) {
 				Duration:      s.currentSong.Track.Duration,
 				AudioReady:    s.listenAlong.AudioURL != "",
 				ListenerCount: listenerCount,
+				Error:         s.listenAlong.Error,
 			},
 		}
 

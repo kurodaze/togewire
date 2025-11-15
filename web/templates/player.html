@@ -151,7 +151,9 @@
             
             let text = `${track.name} - ${track.artist}`;
             
-            if (!currentTrackData.audio_ready) {
+            if (currentTrackData.error) {
+                text += ` (${currentTrackData.error})`;
+            } else if (!currentTrackData.audio_ready) {
                 text += ' (Loading audio...)';
             } else if (!currentTrackData.isPlaying) {
                 text += ' (Paused)';
@@ -288,14 +290,6 @@
             }
 
             const truncatedArtist = truncateText(track.artist);
-            
-            // Handle error state
-            if (data.error) {
-                nowPlaying.textContent = data.error;
-                listenBtn.style.display = 'none';
-                updateTooltip();
-                return;
-            }
             
             if (!data.track_changed || !isListening) {
                 nowPlaying.textContent = `Listening to ${truncatedArtist}`;

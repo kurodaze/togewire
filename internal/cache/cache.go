@@ -37,6 +37,7 @@ type Entry struct {
 	FileSize       int64  `json:"file_size"`
 	DownloadMethod string `json:"download_method"`
 	QueryType      string `json:"query_type"`
+	Error          string `json:"error,omitempty"` // Error message if download failed
 }
 
 // Stats represents cache statistics
@@ -146,6 +147,20 @@ func (m *Manager) Add(key string, entry *Entry) {
 
 	m.save()
 	m.CleanupIfNeeded()
+}
+
+// SetError stores an error state for a track (no file, just error message)
+func (m *Manager) SetError(key string, title string, errorMsg string) {
+	m.mu.Lock()
+	m.entries[key] = &Entry{
+		Title:          title,
+		CachedAt:       time.Now().Unix(),
+		LastAccessedAt: time.Now().Unix(),
+		Error:          errorMsg,
+	}
+	m.mu.Unlock()
+
+	m.save()
 }
 
 // removes an entry from the cache

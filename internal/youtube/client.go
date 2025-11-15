@@ -115,6 +115,12 @@ func (c *Client) PrepareTrack(track *types.Track) (string, error) {
 	}
 
 	if cached, exists := c.cache.Get(cacheKey); exists {
+		// Check if it's an error entry
+		if cached.Error != "" {
+			logger.Debug("Cached error: %s - %s (%s)", track.Name, track.Artist, cached.Error)
+			return "", fmt.Errorf("%s", cached.Error)
+		}
+
 		logger.Debug("Cache hit: %s - %s", track.Name, track.Artist)
 
 		// Update last accessed time for LRU tracking
@@ -126,12 +132,20 @@ func (c *Client) PrepareTrack(track *types.Track) (string, error) {
 	if err != nil {
 		c.failed.Store(trackKey, true)
 		logger.Warn("Failed (won't retry): %s - %s", track.Name, track.Artist)
+
+		// Store error in cache so it persists across restarts
+		c.cache.SetError(cacheKey, track.Name, "search failed: no suitable video found")
+
 		return "", fmt.Errorf("search failed: %w", err)
 	}
 
 	filePath, err := c.downloadAndCacheTrack(track, videoID, queryType)
 	if err != nil {
 		c.failed.Store(trackKey, true)
+
+		// Store error in cache
+		c.cache.SetError(cacheKey, track.Name, "download failed")
+
 		return "", fmt.Errorf("download failed: %w", err)
 	}
 

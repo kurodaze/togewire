@@ -111,9 +111,10 @@ func (s *Server) spotifyMonitorWorker() {
 
 // handleTrackChange handles Spotify track changes with optimized preparation
 func (s *Server) handleTrackChange(track *types.Track, state *types.SpotifyState) {
-	// Clear current audio
+	// Clear current audio and error state
 	s.stateMu.Lock()
 	s.listenAlong.AudioURL = ""
+	s.listenAlong.Error = ""
 	s.stateMu.Unlock()
 
 	// Broadcast immediately to stop old audio
@@ -156,13 +157,17 @@ func (s *Server) handleTrackChange(track *types.Track, state *types.SpotifyState
 		if err != nil {
 			logger.Info("Failed to prepare track: %v", err)
 
-			// Broadcast error state if track is still current
-			s.stateMu.RLock()
+			// Set error state if track is still current
+			s.stateMu.Lock()
 			stillCurrent := s.currentSong != nil && s.currentSong.Track != nil &&
 				s.currentSong.Track.ID == track.ID
-			s.stateMu.RUnlock()
+			if stillCurrent {
+				s.listenAlong.Error = "Audio not found"
+			}
+			s.stateMu.Unlock()
 
 			if stillCurrent {
+				// Broadcast with error
 				s.broadcastTrackUpdateWithError(currentState, false, "Audio not found")
 			}
 			return
@@ -175,6 +180,7 @@ func (s *Server) handleTrackChange(track *types.Track, state *types.SpotifyState
 			s.currentSong.Track.ID == track.ID
 		if stillCurrent {
 			s.listenAlong.AudioURL = fmt.Sprintf("file://%s", filePath)
+			s.listenAlong.Error = "" // Clear any previous error
 		}
 		s.stateMu.Unlock()
 
@@ -283,7 +289,8 @@ func (s *Server) broadcastTrackUpdate(state *types.SpotifyState, trackChanged bo
 	s.broadcastTrackUpdateWithError(state, trackChanged, "")
 }
 
-// broadcastTrackUpdateWithError broadcasts a track update with optional error message
+// broadcastTrackUpdateWithError broadcasts a track update with error override
+// errorMsg temporarily overrides s.listenAlong.Error for this broadcast only
 func (s *Server) broadcastTrackUpdateWithError(state *types.SpotifyState, trackChanged bool, errorMsg string) {
 	if state == nil {
 		return
