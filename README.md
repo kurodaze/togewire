@@ -4,7 +4,7 @@ Share your Spotify listening session with anyone via your own website.
 
 ## Demo
 
-> [demo video](https://main.kurodaze.pages.dev/assets/togewiredemo.mp4)
+> [demo video](https://kurodaze.net/assets/togewiredemo.mp4)
 
 ## Requirements
 
