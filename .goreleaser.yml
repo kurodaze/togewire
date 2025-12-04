@@ -22,8 +22,6 @@ builds:
       - -trimpath
     gcflags:
       - all=-l
-    asmflags:
-      - all=-trimpath={{.Env.GOPATH}}
 
 archives:
   - format: tar.gz
