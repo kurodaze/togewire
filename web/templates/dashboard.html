@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TOGEWIRE{{if not .Authenticated}} - Setup{{end}}</title>
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+    {{if .Authenticated}}
+    <!-- AUTHENTICATED DASHBOARD -->
+    <div class="dashboard">
+        <header class="dashboard-header">
+            <h1>TOGEWIRE</h1>
+            <div class="header-controls">
+                <span class="status-indicator">READY</span>
+            </div>
+        </header>
+        
+        <main class="dashboard-grid">
+            <section class="cache-panel">
+                <h3>CACHE</h3>
+                <div class="panel-content">
+                    <div class="cache-info">
+                        <span id="cache-stats">Loading...</span>
+                        <button onclick="clearCache()" class="action-btn">CLEAR</button>
+                    </div>
+                    <form action="/admin/cache/config" method="POST" class="cache-form">
+                        <label>LIMIT (MB):</label>
+                        <input type="number" name="max_size_mb" value="{{.CacheMaxSizeMB}}" min="0">
+                        <button type="submit" class="action-btn">SET</button>
+                    </form>
+                </div>
+            </section>
+            
+            <section class="togeplayer-panel">
+                <h3>TOGEWIRE PLAYER</h3>
+                <div class="panel-content">
+                    <p>Share this link for music listening:</p>
+                    <div class="togeplayer-link">
+                        <code>{{.Scheme}}://{{.Host}}/player</code>
+                    </div>
+                    <a href="/player" target="_blank" class="action-btn">OPEN PLAYER</a>
+                </div>
+            </section>
+        </main>
+    </div>
+    
+    {{else}}
+    <!-- UNAUTHENTICATED SETUP -->
+    <div class="simple-container">
+        <h1>TOGEWIRE</h1>
+        <p>Configure your Spotify app credentials to get started.</p>
+        
+        {{if .Error}}
+        <div class="error-message">
+            {{.Error}}
+        </div>
+        {{end}}
+        
+        <div class="setup-instructions">
+            <h3>Setup Instructions:</h3>
+            <ol>
+                <li>Visit <a href="https://developer.spotify.com/dashboard" target="_blank">Spotify Developer Dashboard</a></li>
+                <li>Create a new app</li>
+                <li>Set redirect URI to: <code>{{.Scheme}}://{{.Host}}/callback</code></li>
+                <li>Checkmark <strong>Web API</strong> in "APIs used" and save</li>
+                <li>Copy your Client ID and Client Secret below</li>
+            </ol>
+        </div>
+        
+        <form action="/admin/setup" method="POST" class="setup-form">
+            <div class="form-group">
+                <label for="client_id">Client ID:</label>
+                <input type="text" name="client_id" placeholder="CLIENT ID" required>
+            </div>
+            <div class="form-group">
+                <label for="client_secret">Client Secret:</label>
+                <input type="password" name="client_secret" placeholder="CLIENT SECRET" required>
+            </div>
+            <button type="submit" class="main-action">SETUP</button>
+        </form>
+    </div>
+    {{end}}
+    
+    {{if .Authenticated}}
+    <script src="/static/js/admin.js"></script>
+    {{end}}
+</body>
+</html>

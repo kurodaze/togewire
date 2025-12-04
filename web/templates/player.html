@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TOGEWIRE Player</title>
+    <style>
+        body{margin:0;font-family:sans-serif;background:transparent;font-size:14px;width:100%;color:#ccc;padding:8px 12px;box-sizing:border-box;min-height:40px}
+        body.iframe-mode{min-height:0;height:0;overflow:hidden}
+        body.iframe-mode .togewire-player{display:none!important}
+        .togewire-player{display:flex;align-items:center;position:relative;padding:4px 0;width:100%;box-sizing:border-box;justify-content:center}
+        .now-playing{white-space:nowrap;flex-shrink:1;padding:2px 0}
+        .tooltip{position:absolute;left:0;right:0;bottom:-50px;color:#fff;padding:6px 8px;border-radius:3px;font-size:12px;line-height:1.6;z-index:1000;opacity:0;visibility:hidden;transition:opacity .2s,visibility .2s;pointer-events:none;text-align:center;white-space:pre-line}
+        .togewire-player:hover .tooltip{opacity:1;visibility:visible}
+        .listen-btn{background:inherit;color:inherit;border:none;cursor:pointer;font-family:inherit;font-size:12px;white-space:nowrap;flex-shrink:0;min-width:40px;text-align:center}
+        #audio{display:none}
+    </style>
+</head>
+<body>
+    <div class="togewire-player" id="player" style="display: none;">
+        <span class="now-playing" id="nowPlaying">Connecting...</span>
+        <button class="listen-btn" id="listenBtn">join</button>
+        <div class="tooltip" id="tooltip"></div>
+        <audio id="audio" preload="auto"></audio>
+    </div>
+
+    <script>
+        (function() {
+            const dom = {
+                player: document.getElementById('player'),
+                nowPlaying: document.getElementById('nowPlaying'),
+                listenBtn: document.getElementById('listenBtn'),
+                tooltip: document.getElementById('tooltip'),
+                audio: document.getElementById('audio')
+            };
+            const env = { inIframe: window.self !== window.top };
+            const state = {
+                isListening: false,
+                socket: null,
+                currentTrack: null,
+                loadedTrackId: null,
+                requestingTrackId: null,
+                hasShownPlayer: false,
+                lastSyncTime: 0,
+                audioRetryCount: 0
+            };
+            const timers = { sync: null, pause: null, progress: null };
+            const latency = { requestSent: 0, history: [], average: 0 };
+            const audioStream = {
+                buffer: [],
+                blob: null,
+                url: null,
+                receiving: false,
+                startTime: 0
+            };
+
+            const formatTime = (ms) => {
+                const seconds = Math.floor(ms / 1000);
+                const mins = Math.floor(seconds / 60);
+                const secs = seconds % 60;
+                return `${mins}:${secs.toString().padStart(2, '0')}`;
+            };
+
+            const truncateText = (text, maxLength = 22) => {
+                if (!text || text.length <= maxLength) return text;
+                return text.substring(0, maxLength - 2) + '...';
+            };
+
+            function updateTooltip() {
+                if (!state.currentTrack?.track) {
+                    dom.tooltip.textContent = '';
+                    return;
+                }
+                const track = state.currentTrack.track;
+                let progress = state.currentTrack.progress || 0;
+                const duration = state.currentTrack.duration || 0;
+                if (state.currentTrack.isPlaying && state.currentTrack.lastProgressUpdate) {
+                    const diff = Date.now() - state.currentTrack.lastProgressUpdate;
+                    progress = (state.currentTrack.progress || 0) + diff;
+                    if (duration > 0 && progress > duration) progress = duration;
+                }
+                let text = `${track.name} - ${track.artist}`;
+                if (state.currentTrack.error) {
+                    text += ` (${state.currentTrack.error})`;
+                } else if (!state.currentTrack.audio_ready) {
+                    text += ' (Loading audio...)';
+                } else if (!state.currentTrack.isPlaying) {
+                    text += ' (Paused)';
+                } else if (duration > 0) {
+                    text += ` (${formatTime(progress)} / ${formatTime(duration)})`;
+                }
+                if (state.isListening && state.currentTrack.listener_count > 0) {
+                    const others = state.currentTrack.listener_count;
+                    text += others === 1 ? '\nlistening along with 1 other' : `\nlistening along with ${others} others`;
+                }
+                dom.tooltip.textContent = text;
+            }
+
+            function hidePlayer() {
+                if (env.inIframe) {
+                    document.body.classList.add('iframe-mode');
+                }
+                dom.player.style.display = 'none';
+                if (state.isListening) stopListen();
+                cleanupAudioStream();
+            }
+
+            function updateDisplay(data) {
+                const hideAndReset = () => {
+                    if (timers.pause) {
+                        clearTimeout(timers.pause);
+                        timers.pause = null;
+                    }
+                    if (timers.progress) {
+                        clearInterval(timers.progress);
+                        timers.progress = null;
+                    }
+                    state.requestingTrackId = null;
+                    hidePlayer();
+                };
+
+                if (!data?.track) {
+                    hideAndReset();
+                    return;
+                }
+
+                if (!data.isPlaying && !data.audio_ready) {
+                    hideAndReset();
+                    return;
+                }
+
+                if (!state.hasShownPlayer && !data.isPlaying) {
+                    return;
+                }
+
+                if (env.inIframe) {
+                    document.body.classList.remove('iframe-mode');
+                }
+
+                const track = data.track;
+                if (data.track_changed) {
+                    const oldTrack = state.currentTrack?.track ? `${state.currentTrack.track.artist} - ${state.currentTrack.track.name}` : 'unknown';
+                    const newTrack = `${track.artist} - ${track.name}`;
+                    console.log(`🔄 Track changed: ${oldTrack} → ${newTrack}`);
+                    dom.audio.pause();
+                    dom.audio.currentTime = 0;
+                    cleanupAudioStream();
+                    if (state.isListening) {
+                        dom.nowPlaying.textContent = `Loading ${truncateText(track.artist)}...`;
+                    }
+                }
+
+                state.currentTrack = data;
+                state.hasShownPlayer = true;
+                if (data.progress !== undefined) {
+                    state.currentTrack.lastProgressUpdate = Date.now();
+                }
+
+                dom.player.style.display = 'flex';
+                dom.listenBtn.style.display = 'inline';
+
+                if (!data.isPlaying) {
+                    if (timers.progress) {
+                        clearInterval(timers.progress);
+                        timers.progress = null;
+                    }
+                    if (!timers.pause) {
+                        timers.pause = setTimeout(hidePlayer, 60000);
+                    }
+                } else {
+                    if (timers.pause) {
+                        clearTimeout(timers.pause);
+                        timers.pause = null;
+                    }
+                    if (!timers.progress && !state.isListening) {
+                        timers.progress = setInterval(updateTooltip, 1000);
+                    }
+                }
+
+                if (!data.track_changed || !state.isListening) {
+                    dom.nowPlaying.textContent = `Listening to ${truncateText(track.artist)}`;
+                }
+
+                if (state.isListening && state.loadedTrackId !== data.track?.id) {
+                    loadAudioSource();
+                }
+
+                dom.listenBtn.textContent = state.isListening ? 'leave' : (data.audio_ready ? 'join' : dom.listenBtn.textContent);
+                updateTooltip();
+            }
+
+            function loadAudioSource() {
+                const currentTrackId = state.currentTrack?.track?.id;
+                if (!currentTrackId || !state.isListening || !state.socket || state.socket.readyState !== WebSocket.OPEN) {
+                    return;
+                }
+                if (currentTrackId === state.loadedTrackId && audioStream.url) {
+                    console.log('🎵 Audio already loaded for current track, skipping request');
+                    return;
+                }
+                if (currentTrackId === state.requestingTrackId) {
+                    console.log('🎵 Already requesting this track, skipping duplicate request');
+                    return;
+                }
+                const trackName = state.currentTrack?.track ? `${state.currentTrack.track.artist} - ${state.currentTrack.track.name}` : currentTrackId;
+                console.log(`🎵 Requesting audio: ${trackName}`);
+                state.requestingTrackId = currentTrackId;
+                state.socket.send(JSON.stringify({ type: 'request_audio_stream', track_id: currentTrackId }));
+            }
+
+            function cleanupAudioStream() {
+                if (audioStream.url) {
+                    URL.revokeObjectURL(audioStream.url);
+                    audioStream.url = null;
+                }
+                audioStream.blob = null;
+                audioStream.buffer = [];
+                audioStream.receiving = false;
+                state.loadedTrackId = null;
+                state.requestingTrackId = null;
+                dom.audio.removeAttribute('src');
+                dom.audio.load();
+            }
+
+            function handleAudioStreamStart(data) {
+                const trackName = state.currentTrack?.track ? `${state.currentTrack.track.artist} - ${state.currentTrack.track.name}` : data.track_id;
+                console.log(`⬇️ Receiving ${trackName} (${Math.round(data.content_length / 1024)}KB)`);
+                audioStream.receiving = true;
+                audioStream.buffer = [];
+                state.requestingTrackId = data.track_id;
+                dom.nowPlaying.textContent = `Loading audio... (${Math.round(data.content_length / 1024)}KB)`;
+                audioStream.startTime = performance.now();
+            }
+
+            function handleAudioChunk(data) {
+                if (!audioStream.receiving) return;
+                try {
+                    if (!data.data || data.data.length === 0) {
+                        console.error('⚠️ Received empty chunk');
+                        return;
+                    }
+                    const binaryString = atob(data.data);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    audioStream.buffer.push(bytes);
+                } catch (e) {
+                    console.error('❌ Error processing audio chunk:', e);
+                    audioStream.receiving = false;
+                    audioStream.buffer = [];
+                }
+            }
+
+            function handleAudioStreamEnd(data) {
+                audioStream.receiving = false;
+                const expectedTrackId = data.track_id || state.requestingTrackId;
+                const currentTrackId = state.currentTrack?.track?.id;
+                if (expectedTrackId && currentTrackId && expectedTrackId !== currentTrackId) {
+                    console.log('🔄 Discarding stale audio (server should prevent this)');
+                    return;
+                }
+                try {
+                    if (audioStream.buffer.length === 0) {
+                        console.error('⚠️ No audio chunks received!');
+                        return;
+                    }
+                    const totalLength = audioStream.buffer.reduce((sum, chunk) => sum + chunk.length, 0);
+                    console.log(`🔧 Assembling ${audioStream.buffer.length} chunks (${totalLength} bytes)`);
+                    const combined = new Uint8Array(totalLength);
+                    let offset = 0;
+                    for (const chunk of audioStream.buffer) {
+                        combined.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+                    audioStream.blob = new Blob([combined], { type: 'audio/ogg; codecs=opus' });
+                    audioStream.url = URL.createObjectURL(audioStream.blob);
+                    console.log(`🎵 Created blob: ${audioStream.url}`);
+                    dom.audio.src = audioStream.url;
+                    state.loadedTrackId = state.currentTrack?.track?.id;
+                    dom.audio.oncanplay = null;
+                    dom.audio.onerror = null;
+                    let canplayFired = false;
+                    dom.audio.oncanplay = () => {
+                        if (canplayFired) return;
+                        canplayFired = true;
+                        const totalTime = audioStream.startTime ? (performance.now() - audioStream.startTime).toFixed(0) : 'unknown';
+                        console.log(`✅ Ready to play (${totalTime}ms)`);
+                        state.audioRetryCount = 0;
+                        if (state.currentTrack?.progress && state.isListening) {
+                            const spotifyProgress = formatTime(state.currentTrack.progress);
+                            console.log(`🌀 Initial sync to ${spotifyProgress} (Spotify)`);
+                            dom.audio.currentTime = state.currentTrack.progress / 1000;
+                        }
+                        const track = state.currentTrack.track;
+                        dom.nowPlaying.textContent = `Listening to ${truncateText(track.artist)}`;
+                        if (state.isListening && state.currentTrack?.isPlaying && dom.audio.paused) {
+                            dom.audio.play().catch((e) => console.log('Auto-play prevented:', e));
+                        }
+                    };
+                    dom.audio.onerror = (e) => {
+                        console.error('❌ Audio decode error:', e, dom.audio.error);
+                        console.log(`🔍 Blob size: ${audioStream.blob?.size}, chunks: ${audioStream.buffer.length}`);
+                        if (state.audioRetryCount < 1) {
+                            state.audioRetryCount++;
+                            console.log(`🔄 Retrying audio request (attempt ${state.audioRetryCount + 1}/2)...`);
+                            dom.nowPlaying.textContent = 'Retrying...';
+                            cleanupAudioStream();
+                            setTimeout(() => loadAudioSource(), 1000);
+                        } else {
+                            console.error('❌ Retry failed, giving up');
+                            dom.nowPlaying.textContent = 'Audio failed - refresh page';
+                            state.audioRetryCount = 0;
+                        }
+                    };
+                    dom.audio.load();
+                } catch (e) {
+                    console.error('Error finalizing audio stream:', e);
+                    dom.nowPlaying.textContent = 'Audio loading failed';
+                }
+            }
+        
+            function requestSync() {
+                if (!state.isListening || !dom.audio || !state.socket) return;
+                const audioTime = dom.audio.currentTime;
+                if (dom.audio.readyState < 2) return;
+                if (audioTime === 0 && state.currentTrack?.progress > 5000) return;
+                latency.requestSent = performance.now();
+                state.socket.send(JSON.stringify({
+                    type: 'sync_request',
+                    audio_time: audioTime,
+                    client_timestamp: Date.now()
+                }));
+            }
+
+            function handleSyncResponse(data) {
+                if (!state.isListening || !dom.audio) return;
+                try {
+                    if (data.timestamp && latency.requestSent > 0) {
+                        const totalLatency = Math.abs(Date.now() - data.timestamp);
+                        latency.history.push(totalLatency);
+                        if (latency.history.length > 10) latency.history.shift();
+                        latency.average = latency.history.reduce((a, b) => a + b, 0) / latency.history.length;
+                        latency.requestSent = 0;
+                    }
+                    const currentTrackId = state.currentTrack?.track?.id;
+                    if (state.loadedTrackId && currentTrackId && state.loadedTrackId !== currentTrackId) {
+                        return;
+                    }
+                    if (data.track_id && state.loadedTrackId && data.track_id !== state.loadedTrackId) {
+                        console.log('⚠️ Ignoring sync for wrong track');
+                        return;
+                    }
+                    if (dom.audio.readyState < 4) {
+                        if (data.is_playing && dom.audio.paused && dom.audio.readyState >= 2) {
+                            dom.audio.play().catch(() => {});
+                        } else if (!data.is_playing && !dom.audio.paused) {
+                            dom.audio.pause();
+                        }
+                        return;
+                    }
+                    const audioTime = dom.audio.currentTime;
+                    const spotifyTime = data.progress / 1000;
+                    const diff = Math.abs(spotifyTime - audioTime);
+                    if (state.currentTrack) {
+                        state.currentTrack.progress = data.progress;
+                        state.currentTrack.isPlaying = data.is_playing;
+                        state.currentTrack.lastProgressUpdate = Date.now();
+                        updateTooltip();
+                    }
+                    if (audioTime === 0 && !dom.audio.paused) return;
+                    if (spotifyTime < 3) return;
+                    const latencyBuffer = (latency.average / 1000) * 4;
+                    const driftThreshold = 5 + Math.max(0, latencyBuffer);
+                    const duration = dom.audio.duration || 0;
+                    const nearStart = audioTime < 2;
+                    const nearEnd = duration > 0 && audioTime > duration - 5;
+                    if (diff > driftThreshold && !nearStart && !nearEnd) {
+                        const audioProgress = formatTime(audioTime * 1000);
+                        const spotifyProgress = formatTime(data.progress);
+                        console.log(`🌀 Spotify sync: audio ${audioProgress} -> Spotify ${spotifyProgress} (drift: ${diff.toFixed(1)}s, threshold: ${driftThreshold.toFixed(1)}s, latency: ${latency.average.toFixed(0)}ms)`);
+                        state.lastSyncTime = Date.now();
+                        dom.audio.currentTime = spotifyTime;
+                    }
+                    if (data.is_playing && dom.audio.paused) {
+                        dom.audio.play().catch(() => {});
+                    } else if (!data.is_playing && !dom.audio.paused) {
+                        dom.audio.pause();
+                    }
+                } catch (e) {
+                    console.warn('Sync error:', e);
+                }
+            }
+
+            async function toggleListen() {
+                if (state.isListening) {
+                    await stopListen();
+                } else {
+                    await startListen();
+                }
+            }
+
+            async function startListen() {
+                try {
+                    state.isListening = true;
+                    dom.listenBtn.textContent = 'leave';
+                    if (timers.progress) {
+                        clearInterval(timers.progress);
+                        timers.progress = null;
+                    }
+                    if (timers.sync) {
+                        clearInterval(timers.sync);
+                        timers.sync = null;
+                    }
+                    loadAudioSource();
+                    timers.sync = setInterval(requestSync, 500);
+                } catch (e) {
+                    console.error('Error starting listen:', e);
+                }
+            }
+
+            async function stopListen() {
+                state.isListening = false;
+                dom.listenBtn.textContent = 'join';
+                dom.audio.pause();
+                if (timers.sync) {
+                    clearInterval(timers.sync);
+                    timers.sync = null;
+                }
+                cleanupAudioStream();
+                if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+                    state.socket.send(JSON.stringify({ type: 'stop_listening' }));
+                }
+                updateTooltip();
+                if (state.currentTrack?.isPlaying && !timers.progress) {
+                    timers.progress = setInterval(updateTooltip, 1000);
+                }
+            }
+
+            function connectWebSocket() {
+                try {
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    state.socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+                    state.socket.onopen = () => {
+                        console.log('🔌 WebSocket connected');
+                    };
+                    state.socket.onclose = (event) => {
+                        console.log('🔌 WebSocket disconnected:', event.code, event.reason);
+                        hidePlayer();
+                        if (state.isListening) stopListen();
+                    };
+                    state.socket.onmessage = (event) => {
+                        const message = JSON.parse(event.data);
+                        switch (message.type) {
+                            case 'track_update':
+                                updateDisplay(message.data);
+                                break;
+                            case 'sync_response':
+                                handleSyncResponse(message.data);
+                                break;
+                            case 'audio_stream_start':
+                                handleAudioStreamStart(message.data);
+                                break;
+                            case 'audio_chunk':
+                                handleAudioChunk(message.data);
+                                break;
+                            case 'audio_stream_end':
+                                handleAudioStreamEnd(message.data);
+                                break;
+                            case 'audio_stream_error':
+                                console.error('🎵 WebSocket audio stream error:', message.data.error);
+                                dom.nowPlaying.textContent = 'Audio failed to load';
+                                break;
+                            case 'audio_stream_response':
+                                if (message.data.error) {
+                                    state.requestingTrackId = null;
+                                    console.log('⏳ Audio not ready yet, waiting for server...');
+                                }
+                                break;
+                            default:
+                                console.log('Unknown WebSocket message:', message);
+                        }
+                    };
+                    state.socket.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        hidePlayer();
+                    };
+                } catch (e) {
+                    console.error('WebSocket setup error:', e);
+                    hidePlayer();
+                }
+            }
+
+            dom.listenBtn.addEventListener('click', toggleListen);
+
+            if (env.inIframe) {
+                document.body.classList.add('iframe-mode');
+            }
+            connectWebSocket();
+        })();
+    </script>
+</body>
+</html>

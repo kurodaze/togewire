@@ -1,0 +1,53 @@
+<!-- TOGEWIRE Player Iframe - Source: https://github.com/kurodaze/togewire -->
+<div id="togewire-iframe" style="text-align:center;margin-top:15px;display:none;"></div>
+
+<script>
+(function() {
+    const serverUrl = 'https://togewire.domain.tld'; // change me
+    const host = document.getElementById('togewire-iframe');
+    let iframe;
+
+    async function ping() {
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 5000);
+            const res = await fetch(`${serverUrl}/ping?t=${Date.now()}`, { signal: controller.signal });
+            clearTimeout(timer);
+            return res.ok ? res.json() : null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function show() {
+        if (!iframe) {
+            iframe = document.createElement('iframe');
+            iframe.src = `${serverUrl}/player`;
+            iframe.style.cssText = 'border:0;background:transparent;width:100%;max-width:600px;height:90px;overflow:hidden;';
+            iframe.scrolling = 'no';
+        }
+        if (!host.contains(iframe)) {
+            host.textContent = '';
+            host.appendChild(iframe);
+        }
+        host.style.display = 'block';
+    }
+
+    function hide() {
+        host.style.display = 'none';
+        host.textContent = '';
+        iframe = null;
+    }
+
+    async function tick() {
+        const data = await ping();
+        const shouldShow = data && data.status === 'ok' && data.is_playing;
+        shouldShow ? show() : hide();
+    }
+
+    tick();
+    const interval = setInterval(tick, 6000);
+    window.addEventListener('beforeunload', () => clearInterval(interval));
+})();
+</script>
+<!-- END TOGEWIRE Player Iframe -->

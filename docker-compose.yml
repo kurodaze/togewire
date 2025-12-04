@@ -1,0 +1,14 @@
+services:
+  togewire:
+    image: ghcr.io/kurodaze/togewire:latest
+    container_name: togewire
+    restart: unless-stopped
+    ports:
+      - "7093:7093"
+    environment:
+      - LOG_LEVEL=info
+    # Uncomment to run as non-root (optional, may require: sudo chown -R $UID:$GID configs data)
+    # user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./configs:/app/configs
+      - ./data:/app/data

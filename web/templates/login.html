@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TOGEWIRE - {{if .IsSetup}}Setup{{else}}Login{{end}}</title>
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+    <div class="auth-container">
+        <div class="auth-box">
+            <h1>TOGEWIRE {{if .IsSetup}}SETUP{{else}}ADMIN{{end}}</h1>
+            {{if .IsSetup}}
+            <p class="subtitle">Set your admin password to secure this installation.</p>
+            {{end}}
+            
+            {{if .Error}}
+            <div class="error-message">
+                {{.Error}}
+            </div>
+            {{end}}
+            
+            <form action="/admin/login" method="POST">
+                {{if .IsSetup}}
+                <div class="form-group">
+                    <label for="setup_token">Setup Token (from terminal):</label>
+                    <input type="text" name="setup_token" placeholder="Enter token" required autofocus style="font-family: monospace;">
+                </div>
+                {{end}}
+                <div class="form-group">
+                    <label for="password">{{if .IsSetup}}Admin Password{{else}}Password{{end}}:</label>
+                    <input type="password" name="password" placeholder="{{if .IsSetup}}Choose a strong password{{else}}Enter your password{{end}}" required {{if .IsSetup}}minlength="8"{{else}}autofocus{{end}}>
+                </div>
+                <button type="submit">{{if .IsSetup}}SET PASSWORD{{else}}LOGIN{{end}}</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
