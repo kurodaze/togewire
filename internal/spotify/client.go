@@ -2,6 +2,8 @@ package spotify
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -88,6 +90,14 @@ func New() *Client {
 	return client
 }
 
+func generateState() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
+}
+
 // UpdateCredentials updates the OAuth configuration with new credentials
 func (c *Client) UpdateCredentials(clientID, clientSecret, redirectURI string) {
 	c.mu.Lock()
@@ -100,7 +110,12 @@ func (c *Client) UpdateCredentials(clientID, clientSecret, redirectURI string) {
 
 // GetAuthURL returns the Spotify OAuth authorization URL
 func (c *Client) GetAuthURL() string {
-	return c.oauthConfig.AuthCodeURL("state", oauth2.AccessTypeOffline)
+	state, err := generateState()
+	if err != nil {
+		// In the unlikely event of a failure to generate state, fall back to empty state.
+		state = ""
+	}
+	return c.oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
 }
 
 // ExchangeCode exchanges authorization code for tokens
