@@ -99,8 +99,8 @@ func (c *Client) UpdateCredentials(clientID, clientSecret, redirectURI string) {
 }
 
 // GetAuthURL returns the Spotify OAuth authorization URL
-func (c *Client) GetAuthURL() string {
-	return c.oauthConfig.AuthCodeURL("state", oauth2.AccessTypeOffline)
+func (c *Client) GetAuthURL(state string) string {
+	return c.oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
 }
 
 // ExchangeCode exchanges authorization code for tokens

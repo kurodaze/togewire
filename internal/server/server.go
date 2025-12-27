@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -19,6 +22,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+)
+
+const (
+	spotifyOAuthStateCookieName = "togewire_spotify_oauth_state"
+	spotifyOAuthStateTTL        = 10 * time.Minute
 )
 
 const (
@@ -565,16 +573,47 @@ func (s *Server) handleAdminSetupPost(c *gin.Context) {
 
 // Spotify OAuth handlers
 func (s *Server) handleSpotifyAuth(c *gin.Context) {
-	url := s.spotifyClient.GetAuthURL()
+	stateBytes := make([]byte, 32)
+	if _, err := rand.Read(stateBytes); err != nil {
+		logger.Error("Failed to generate OAuth state: %v", err)
+		c.Redirect(http.StatusFound, "/?error=Failed to start Spotify authentication")
+		return
+	}
+	state := base64.RawURLEncoding.EncodeToString(stateBytes)
+
+	isSecure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+	c.SetCookie(spotifyOAuthStateCookieName, state, int(spotifyOAuthStateTTL.Seconds()), "/", "", isSecure, true)
+	c.Header("Set-Cookie", c.Writer.Header().Get("Set-Cookie")+"; SameSite=Lax")
+
+	url := s.spotifyClient.GetAuthURL(state)
 	c.Redirect(302, url)
 }
 
 func (s *Server) handleSpotifyCallback(c *gin.Context) {
 	code := c.Query("code")
+	state := c.Query("state")
 	if code == "" {
 		c.Redirect(http.StatusFound, "/?error=No authorization code received from Spotify")
 		return
 	}
+	if state == "" {
+		c.Redirect(http.StatusFound, "/?error=Missing state from Spotify callback")
+		return
+	}
+
+	expectedState, err := c.Cookie(spotifyOAuthStateCookieName)
+	if err != nil || expectedState == "" {
+		c.Redirect(http.StatusFound, "/?error=Spotify authentication expired, please try again")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(state), []byte(expectedState)) != 1 {
+		c.Redirect(http.StatusFound, "/?error=Invalid Spotify authentication response")
+		return
+	}
+
+	isSecure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+	c.SetCookie(spotifyOAuthStateCookieName, "", -1, "/", "", isSecure, true)
+	c.Header("Set-Cookie", c.Writer.Header().Get("Set-Cookie")+"; SameSite=Lax")
 
 	if err := s.spotifyClient.ExchangeCode(code); err != nil {
 		logger.Error("Failed to exchange authorization code: %v", err)
