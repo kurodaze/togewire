@@ -109,14 +109,14 @@ func (c *Client) UpdateCredentials(clientID, clientSecret, redirectURI string) {
 }
 
 // GetAuthURL returns the Spotify OAuth authorization URL
-func (c *Client) GetAuthURL() string {
+func (c *Client) GetAuthURL() (string, error) {
 	state, err := generateState()
 	if err != nil {
-		// In the unlikely event of a failure to generate state, fall back to empty state.
-		state = ""
+		return "", fmt.Errorf("failed to generate OAuth state: %w", err)
 	}
-	return c.oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
+	return c.oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline), nil
 }
+
 
 // ExchangeCode exchanges authorization code for tokens
 func (c *Client) ExchangeCode(code string) error {
