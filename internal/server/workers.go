@@ -407,35 +407,38 @@ func (s *Server) idleOptimizationWorker() {
 				timeSinceDownload.Round(time.Minute), upgradeCount, totalTracks)
 
 			upgraded := 0
-			skipped := 0
+			failed := 0
+			attempted := 0
 
 			for key, entry := range needsUpgrade {
-				if upgraded >= maxUpgradesPerRun {
+				if attempted >= maxUpgradesPerRun {
 					break
 				}
 
 				if s.youtubeClient.IsCurrentlyDownloading() {
-					logger.Info("Download activity detected, pausing optimization (upgraded %d, skipped %d)", upgraded, skipped)
+					logger.Info("Download activity detected, pausing optimization (upgraded %d, failed %d)", upgraded, failed)
 					upgradeTimer.Stop()
 					break
 				}
+
+				attempted++
 
 				// Upgrade track
 				if err := s.youtubeClient.UpgradeTrack(key, entry); err == nil {
 					upgraded++
 				} else {
-					skipped++
+					failed++
 				}
 
 				// Small delay between upgrades
 				time.Sleep(2 * time.Second)
 			}
 
-			if upgraded > 0 || skipped > 0 {
-				logger.Info("Optimization cycle complete: upgraded %d tracks, skipped %d", upgraded, skipped)
+			if upgraded > 0 || failed > 0 {
+				logger.Info("Optimization cycle complete: upgraded %d tracks, failed %d", upgraded, failed)
 			}
 
-			// Check if there are still tracks needing upgrade
+			// Check if there are still tracks needing upgrade (excludes failed ones)
 			remainingUpgrades := s.youtubeClient.GetEntriesNeedingUpgrade()
 			if len(remainingUpgrades) > 0 && !s.youtubeClient.IsCurrentlyDownloading() {
 				logger.Info("%d tracks still need upgrade, scheduling next cycle in %v",

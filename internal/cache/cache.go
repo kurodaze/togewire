@@ -39,6 +39,7 @@ type Entry struct {
 	DownloadMethod string `json:"download_method"`
 	QueryType      string `json:"query_type"`
 	Error          string `json:"error,omitempty"`
+	UpgradeFailed  bool   `json:"upgrade_failed,omitempty"` // true if track can't be upgraded to best_audio
 }
 
 // Stats reports cache status.
@@ -376,13 +377,25 @@ func (m *Manager) GetOutputTemplate() string {
 	return filepath.Join(m.dir, "%(title)s [%(id)s].%(ext)s")
 }
 
+// MarkUpgradeFailed marks a track as unable to be upgraded to best_audio quality
+func (m *Manager) MarkUpgradeFailed(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if entry, ok := m.entries[key]; ok {
+		entry.UpgradeFailed = true
+		m.saveLocked()
+	}
+}
+
 func (m *Manager) GetEntriesNeedingUpgrade() map[string]*Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	needs := make(map[string]*Entry)
 	for key, entry := range m.entries {
-		if entry.DownloadMethod != "best_audio" && entry.Error == "" {
+		// Skip if already best_audio, has error, or upgrade previously failed
+		if entry.DownloadMethod != "best_audio" && entry.Error == "" && !entry.UpgradeFailed {
 			needs[key] = entry
 		}
 	}

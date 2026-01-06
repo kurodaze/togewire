@@ -526,7 +526,7 @@ func (c *Client) ClearCache() error {
 }
 
 // UpgradeTrack attempts to re-download a track with best_audio method
-// Returns nil without error if upgrade fails (keeps existing lower quality)
+// Returns error if upgrade fails, nil on success
 func (c *Client) UpgradeTrack(cacheKey string, entry *cache.Entry) error {
 	logger.Debug("Upgrading track quality: %s (from %s to best_audio)", entry.Title, entry.DownloadMethod)
 
@@ -534,7 +534,9 @@ func (c *Client) UpgradeTrack(cacheKey string, entry *cache.Entry) error {
 	filePath, err := c.tryDownloadMethod(entry.VideoID, "ba", "best_audio")
 	if err != nil {
 		logger.Warn("Could not upgrade track, keeping %s quality: %s", entry.DownloadMethod, entry.Title)
-		return nil // Return nil to skip, not an error
+		// Mark as upgrade failed to avoid retrying
+		c.cache.MarkUpgradeFailed(cacheKey)
+		return fmt.Errorf("upgrade failed for %s: %w", entry.Title, err)
 	}
 
 	// Success - remove old file
