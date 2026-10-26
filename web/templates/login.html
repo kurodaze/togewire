@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>togewire</title>
+  <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+  <main class="auth">
+    <div class="auth-card">
+      <div class="brand">togewire</div>
+      <form id="login-form" action="/admin/login" method="POST">
+        {% if step == "login" %}
+        <input type="password" name="password" class="auth-input{% if error %} auth-input--error{% endif %}" placeholder="Password" aria-label="Password" required autofocus autocomplete="current-password">
+        {% elif step == "token" %}
+        <input type="text" name="setup_token" class="auth-input{% if error %} auth-input--error{% endif %}" placeholder="Setup token" aria-label="Setup token" required autofocus autocomplete="off" spellcheck="false">
+        {% else %}
+        <input type="hidden" name="setup_token" value="{{ setup_token }}">
+        {% if step == "password" %}
+        <input type="password" name="password" class="auth-input{% if error %} auth-input--error{% endif %}" placeholder="New password" aria-label="New password" required autofocus minlength="8" autocomplete="new-password">
+        {% else %}
+        <input type="password" name="confirm" class="auth-input{% if error %} auth-input--error{% endif %}" placeholder="Confirm password" aria-label="Confirm password" required autofocus autocomplete="new-password">
+        {% endif %}
+        {% endif %}
+      </form>
+      {% if error and step != "login" %}
+      <div class="auth-error">{{ error }}</div>
+      {% endif %}
+    </div>
+  </main>
+</body>
+</html>

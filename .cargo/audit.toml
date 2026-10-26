@@ -1,0 +1,38 @@
+# cargo-audit configuration
+# https://github.com/rustsec/rustsec/blob/main/cargo-audit/audit.toml.example
+
+[advisories]
+ignore = [
+    # quick-xml: DoS in duplicate attribute checks (RUSTSEC-2026-0194) and NsReader allocation (RUSTSEC-2026-0195).
+    # Transitive via librespot-core 0.8.0. Togewire does not parse user-supplied XML; only used internally for Spotify metadata.
+    # Fixed upstream in quick-xml >=0.41, awaiting librespot migration.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+
+    # rsa: Marvin timing side-channel attack on PKCS#1 v1.5 padding/decryption.
+    # Transitive via librespot-core 0.8.0. No upstream fix available for rsa 0.9.x.
+    # Togewire is a client connecting to Spotify APs, not an RSA decryption server/oracle.
+    "RUSTSEC-2023-0071",
+
+    # rustls-webpki: CRL and wildcard/URI name constraint validation issues in 0.102.8, and distrusted
+    # emSign intermediates (RUSTSEC-2026-0382, fixed only in 0.103.16).
+    # Transitive via hyper-proxy2 0.1.0 inside librespot-core 0.8.0.
+    # Togewire does not configure an HTTP proxy for Spotify; this TLS stack is dead code at runtime.
+    # Togewire's active TLS stack uses rustls 0.23 + rustls-webpki 0.103.16.
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0382",
+
+    # rustls 0.22.4: TLS secrets in `Debug` output of client session values (RUSTSEC-2026-0346) and an
+    # unauthenticated downgrade from post-quantum key exchange (RUSTSEC-2026-0349). No fix for 0.22.
+    # Transitive via hyper-proxy2 0.1.0 inside librespot-core 0.8.0. Togewire's SessionConfig sets no
+    # proxy, so this TLS stack never runs; the active one is rustls 0.23.46.
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0349",
+
+    # rustls-pemfile: Unmaintained crate warning.
+    # Pulled via hyper-proxy2 0.1.0 inside librespot-core 0.8.0 (unused proxy path).
+    "RUSTSEC-2025-0134",
+]

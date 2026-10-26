@@ -1,0 +1,47 @@
+[package]
+name = "togewire"
+version = "2.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+togematch = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "process", "sync", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = { version = "0.6", features = ["all"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls", "blocking"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bcrypt = "0.19"
+rand = "0.10"
+base64 = "0.23"
+subtle = "2"
+sha2 = "0.11"
+flate2 = "1"
+parking_lot = "0.12"
+tera = { version = "2", default-features = false }
+rust-embed = { version = "8", features = ["debug-embed"] }
+futures = "0.3"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
+librespot-metadata = { version = "0.8", default-features = false }
+librespot-audio = { version = "0.8", default-features = false }
+# Pin so librespot-core's build.rs resolves a compatible vergen stack.
+vergen = "=9.0.6"
+vergen-gitcl = "=1.0.5"
+vergen-lib = "=0.1.6"
+
+[profile.release]
+lto = "fat"
+strip = true
+panic = "abort"
+codegen-units = 1
+
+[profile.dev]
+debug = 1

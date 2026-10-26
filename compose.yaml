@@ -1,0 +1,18 @@
+services:
+  togewire:
+    image: ghcr.io/kurodaze/togewire:latest
+    container_name: togewire
+    restart: unless-stopped
+    init: true
+    # must own configs/ and data/: your `id -u`:`id -g` if that isn't 1000
+    user: "1000:1000"
+    # userns_mode: keep-id   # rootless Podman
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "7093:7093"
+    volumes:
+      - ./configs:/app/configs:Z
+      - ./data:/app/data:Z
+    environment:
+      - TZ=UTC

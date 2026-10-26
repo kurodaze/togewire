@@ -1,0 +1,12 @@
+configs/
+data/
+debug
+target
+/togewire
+/togewire-*
+/togewire.tmp
+/togedemon
+/togedemon-*
+/togedemon.tmp
+**/*.rs.bk
+*.pdb

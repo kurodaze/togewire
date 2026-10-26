@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>togewire</title>
+  <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+  <main class="page">
+    <header class="header">
+      <div class="brand">togewire</div>
+      <div class="player-controls">
+        <a class="player-link{% if player_enabled %} is-on{% endif %}" id="player-nav" href="/player" target="_blank" rel="noopener"{% if not player_enabled %} title="Turn the player on first"{% endif %}>
+          <span class="live-dot" aria-hidden="true"></span>
+          <span>Player</span>
+        </a>
+        <label class="switch" title="Public player and stream">
+          <input type="checkbox" id="player-toggle"{% if player_enabled %} checked{% endif %}>
+          <span class="switch-track" aria-hidden="true"></span>
+          <span id="player-toggle-label">{% if player_enabled %}On{% else %}Off{% endif %}</span>
+        </label>
+      </div>
+    </header>
+
+    {% if authenticated %}
+
+    <section class="section">
+      <h2>Spotify</h2>
+      <div class="section-body">
+        <p>
+          {% if plan == "premium" %}Connected with Premium. {% if use_librespot %}Tracks are cached from Spotify with librespot.{% else %}librespot is turned off, so tracks are cached from YouTube.{% endif %}
+          {% elif plan == "free" %}Connected with a free account, so tracks are cached from YouTube.
+          {% else %}Connected. Spotify didn't say which plan this is, so tracks are cached from YouTube.{% endif %}
+        </p>
+        <form id="disconnect-form" class="actions" action="/admin/disconnect" method="POST">
+          <button type="submit" class="btn btn-danger">Disconnect</button>
+        </form>
+      </div>
+    </section>
+
+    <form id="settings-form" action="/admin/cache" method="POST">
+      <section class="section">
+        <h2>Audio</h2>
+        <div class="section-body">
+          <div class="field">
+            <label for="audio_bitrate">Quality of newly cached tracks</label>
+            <p class="hint" id="audio_bitrate-hint">YouTube's own Opus is kept as it is, and tracks already cached keep their quality.</p>
+            <select name="audio_bitrate" id="audio_bitrate" aria-describedby="audio_bitrate-hint">
+              <option value="112k"{% if audio_bitrate == "112k" %} selected{% endif %}>Normal, 112 kbps</option>
+              <option value="144k"{% if audio_bitrate == "144k" %} selected{% endif %}>High, 144 kbps</option>
+              <option value="192k"{% if audio_bitrate == "192k" %} selected{% endif %}>Very high, 192 kbps</option>
+              <option value="256k"{% if audio_bitrate == "256k" %} selected{% endif %}>Max, 256 kbps</option>
+            </select>
+          </div>
+          <div class="field" id="low-data-group">
+            <span class="label" id="low_data-label">Low data streaming</span>
+            <p class="hint" id="low_data-hint">Streams tracks cached above 144 kbps at 112 kbps.</p>
+            <label class="switch">
+              <input type="checkbox" name="low_data_streaming" value="1"{% if low_data_streaming %} checked{% endif %} aria-labelledby="low_data-label" aria-describedby="low_data-hint">
+              <span class="switch-track" aria-hidden="true"></span>
+            </label>
+          </div>
+          <div class="field">
+            <span class="label" id="normalization-label">Normalization</span>
+            <p class="hint" id="normalization-hint">To &minus;14 LUFS. Stream only leaves cached files alone; cache to disk tags new ones with ReplayGain.</p>
+            <div class="choices" role="radiogroup" aria-labelledby="normalization-label" aria-describedby="normalization-hint">
+              <label><input type="radio" name="normalization" value="off"{% if normalization == "off" %} checked{% endif %}> Off</label>
+              <label><input type="radio" name="normalization" value="stream"{% if normalization == "stream" %} checked{% endif %}> Stream only</label>
+              <label><input type="radio" name="normalization" value="cache"{% if normalization == "cache" %} checked{% endif %}> Cache to disk</label>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Cache</h2>
+        <div class="section-body">
+          <p>{{ cache_used_mb }} MB of {{ cache_max_mb }} MB used, {{ cache_entries }} tracks.</p>
+          <div class="field">
+            <label for="cache_max_mb">Limit in MB</label>
+            <p class="hint" id="cache_max_mb-hint">At least 64. The oldest tracks go first when it's full.</p>
+            <input type="number" name="cache_max_mb" id="cache_max_mb" min="64" step="1" value="{{ cache_max_mb }}" required aria-describedby="cache_max_mb-hint">
+          </div>
+          <div class="actions">
+            <button type="submit" form="cache-clear-form" class="btn btn-danger">Clear cache</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>togematch-api</h2>
+        <div class="section-body">
+          <div class="field">
+            <label for="togematch_api_url">Address</label>
+            <p class="hint" id="togematch_api_url-hint">Optional. Picks each track's YouTube upload and keeps its matches, shared with your other apps.</p>
+            <input type="url" name="togematch_api_url" id="togematch_api_url" placeholder="http://192.168.1.10:7094" value="{{ togematch_api_url }}" aria-describedby="togematch_api_url-hint">
+          </div>
+        </div>
+      </section>
+    </form>
+    <form id="cache-clear-form" action="/admin/cache/clear" method="POST" hidden></form>
+
+    <section class="section">
+      <h2>togedemon</h2>
+      <div class="section-body">
+        <p>Optional. Run it on the Linux desktop where Spotify plays; its live capture replaces the cached audio while it's connected.</p>
+        <pre class="command" id="togedemon-cmd">TOGEDEMON_TOKEN={{ togedemon_token }} ./{{ togedemon_bin }} --server {{ server_url }}</pre>
+      </div>
+    </section>
+
+    {% else %}
+
+    <section class="section">
+      <h2>Spotify</h2>
+      <div class="section-body">
+        <p>Pair togewire with your Spotify account to follow what you play and cache the tracks.</p>
+        <div class="actions">
+          <button type="button" class="btn" id="start-pair-btn">Pair with Spotify</button>
+        </div>
+      </div>
+    </section>
+
+    {% endif %}
+  </main>
+
+  <script src="/static/js/admin.js"></script>
+</body>
+</html>

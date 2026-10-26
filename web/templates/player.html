@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TOGEPLAYER</title>
+    <link rel="stylesheet" href="/static/css/player.css">
+</head>
+<body>
+    <div class="player">
+        <div class="status" id="status">connecting</div>
+        <div class="track-name hidden" id="trackName"></div>
+        <div class="track-artist hidden" id="trackArtist"></div>
+        <div class="progress-row hidden" id="progressRow">
+            <div class="progress" id="progress"></div>
+            <div class="volume-control hidden" id="volumeControl">
+                <button class="volume-toggle" id="volumeToggle" type="button" aria-label="mute volume">
+                    <svg class="volume-icon" viewBox="0 0 12 12" aria-hidden="true">
+                    <path d="M1.5 4.5H4L6.5 2v8L4 7.5H1.5z" fill="currentColor"/>
+                    <path class="volume-wave" d="M8 4.25a2.25 2.25 0 0 1 0 3.5" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+                    <path class="volume-wave" d="M9.5 2.75a4.1 4.1 0 0 1 0 6.5" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+                    <path class="volume-strike" d="M8.2 3.2l2.3 5.6" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <input class="volume-slider" id="volume" type="range" min="0" max="100" step="1" value="70" aria-label="volume">
+            </div>
+        </div>
+        <button class="btn hidden" id="btn">listen along</button>
+    </div>
+    <script src="/static/js/player.js"></script>
+</body>
+</html>

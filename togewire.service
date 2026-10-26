@@ -1,0 +1,20 @@
+[Unit]
+Description=togewire Spotify listen-along server
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/togewire
+ExecStart=%h/togewire/togewire --port 7093
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
