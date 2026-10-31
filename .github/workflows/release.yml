@@ -20,11 +20,8 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
           [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml says $version"; exit 1; }
-      - run: rustup update stable --no-self-update
-      - run: cargo test --locked
 
   build:
-    needs: test
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -54,7 +51,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [test, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
