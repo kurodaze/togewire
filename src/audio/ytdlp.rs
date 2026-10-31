@@ -203,7 +203,7 @@ impl YtdlpFetcher {
 
 /// Asks the optional togematch-api for this track's YouTube video.
 async fn ask_togematch_api(track: &Track) -> Result<Option<String>> {
-    let Some(base) = crate::config::togematch_api_url() else {
+    let Some(base) = crate::config::togematch_api() else {
         return Ok(None);
     };
     if API_DOWN_UNTIL

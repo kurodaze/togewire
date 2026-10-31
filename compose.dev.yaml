@@ -12,6 +12,8 @@ services:
     # userns_mode: keep-id   # rootless Podman
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "7093:7093"
     volumes:

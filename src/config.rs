@@ -34,7 +34,7 @@ pub struct Config {
     /// Public `/player` and `/stream`. Off = cache-only (download what you listen to).
     pub player_enabled: bool,
     /// Optional togematch-api that picks each track's YouTube video.
-    pub togematch_api_url: String,
+    pub togematch_api: String,
     /// Config file only.
     pub cover_art: CoverArt,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,7 +88,7 @@ impl Default for Config {
             normalization: Normalization::Off,
             low_data_streaming: false,
             player_enabled: false,
-            togematch_api_url: String::new(),
+            togematch_api: String::new(),
             cover_art: CoverArt::Listed,
             spotify_auth: None,
         }
@@ -261,10 +261,10 @@ pub fn low_data_streaming() -> bool {
 }
 
 #[must_use]
-pub fn togematch_api_url() -> Option<String> {
+pub fn togematch_api() -> Option<String> {
     let url = get()
         .read()
-        .togematch_api_url
+        .togematch_api
         .trim()
         .trim_end_matches('/')
         .to_string();

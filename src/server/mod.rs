@@ -403,7 +403,7 @@ async fn handle_dashboard(
         ctx.insert("audio_bitrate", &cfg.audio_bitrate);
         ctx.insert("low_data_streaming", &cfg.low_data_streaming);
         ctx.insert("normalization", &cfg.normalization);
-        ctx.insert("togematch_api_url", &cfg.togematch_api_url);
+        ctx.insert("togematch_api", &cfg.togematch_api);
     }
     let togedemon_bin = if cfg!(debug_assertions) {
         "togedemon-dev"
@@ -809,7 +809,7 @@ struct CacheForm {
     /// A checkbox: sent only when on.
     low_data_streaming: Option<String>,
     #[serde(default)]
-    togematch_api_url: String,
+    togematch_api: String,
 }
 
 async fn handle_admin_cache(
@@ -819,14 +819,10 @@ async fn handle_admin_cache(
     if !config::AUDIO_BITRATES.contains(&form.audio_bitrate.as_str()) {
         return Redirect::to("/admin?n=bad_bitrate");
     }
-    let togematch_api_url = form
-        .togematch_api_url
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
-    if !(togematch_api_url.is_empty()
-        || togematch_api_url.starts_with("http://")
-        || togematch_api_url.starts_with("https://"))
+    let togematch_api = form.togematch_api.trim().trim_end_matches('/').to_string();
+    if !(togematch_api.is_empty()
+        || togematch_api.starts_with("http://")
+        || togematch_api.starts_with("https://"))
     {
         return Redirect::to("/admin?n=bad_togematch_api");
     }
@@ -836,7 +832,7 @@ async fn handle_admin_cache(
         cfg.audio_bitrate = form.audio_bitrate;
         cfg.normalization = form.normalization;
         cfg.low_data_streaming = form.low_data_streaming.is_some();
-        cfg.togematch_api_url = togematch_api_url;
+        cfg.togematch_api = togematch_api;
     });
     if let Err(e) = saved {
         error!("Failed to save cache settings: {e}");

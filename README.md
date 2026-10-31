@@ -27,7 +27,7 @@ Or run directly:
 podman run -d --name togewire --init --user 1000:1000 --userns=keep-id -p 7093:7093 -v ./configs:/app/configs:Z -v ./data:/app/data:Z ghcr.io/kurodaze/togewire:latest
 
 # Docker
-docker run -d --name togewire --init --user 1000:1000 -p 7093:7093 -v ./configs:/app/configs -v ./data:/app/data ghcr.io/kurodaze/togewire:latest
+docker run -d --name togewire --init --user 1000:1000 --add-host=host.docker.internal:host-gateway -p 7093:7093 -v ./configs:/app/configs -v ./data:/app/data ghcr.io/kurodaze/togewire:latest
 ```
 
 To give the container YouTube cookies (required for VPS/datacenter IPs, or for yt-dlp on Free accounts and fallback), stream them into the data volume:
@@ -105,7 +105,7 @@ Key options in `configs/config.json` (also adjustable in `/admin`):
 - `audio_bitrate` (`144k`): Opus VBR bitrate for caching tracks (`112k`, `144k`, `192k`, `256k`); YouTube's own Opus is kept as it is.
 - `low_data_streaming` (`false`): Streams 112k copies for tracks cached above High (> 144k).
 - `normalization` (`off`): `stream` normalizes streams in memory without touching cached files; `cache` tags newly cached files with ReplayGain 2.0 without re-encoding.
-- `togematch_api_url` (empty): optional [togematch-api](https://github.com/kurodaze/togematch) on your network, e.g. `http://192.168.1.10:7094`. It picks the YouTube video for yt-dlp tracks and keeps its matches, shared with your other apps and fixable by hand.
+- `togematch_api` (empty): optional [togematch-api](https://github.com/kurodaze/togematch) on your network, e.g. `http://192.168.1.10:7094` (or `http://host.docker.internal:7094` if togewire runs in Docker and togematch-api is on the host or in an independent container publishing `7094:7094`; or `http://togematch-api:7094` if sharing a Docker network). It picks the YouTube video for yt-dlp tracks and keeps its matches, shared with your other apps and fixable by hand.
 - `cover_art` (`640`): `640` embeds the largest cover Spotify's metadata lists; `original` embeds the cover as uploaded (often 1400 to 3000 px, a few hundred KB more per track) and falls back to 640 (config file only).
 - `log_level` (`info`): `trace`, `debug`, `info`, `warn` or `error` (config file only).
 
