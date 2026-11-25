@@ -10,12 +10,13 @@ permissions:
 
 concurrency:
   group: mirror
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   mirror:
-    if: ${{ !github.event.repository.fork }}
+    if: ${{ !github.event.repository.fork && github.repository_owner == 'kurodaze' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,8 +26,14 @@ jobs:
       - name: Push to GitLab
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          GIT_TERMINAL_PROMPT: "0"
         run: |
+          auth_header=$(printf 'oauth2:%s' "$GITLAB_TOKEN" | base64 -w 0)
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="http.https://gitlab.com/.extraHeader" \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" \
           git push --force --prune \
-            "https://oauth2:${GITLAB_TOKEN}@gitlab.com/kurodaze/${{ github.event.repository.name }}.git" \
+            "https://gitlab.com/kurodaze/${REPO_NAME}.git" \
             'refs/remotes/origin/*:refs/heads/*' \
             'refs/tags/*:refs/tags/*'
