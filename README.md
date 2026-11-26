@@ -2,10 +2,10 @@
 
 Self-hosted Spotify listen-along. Run `togewire` on a server, pair your Spotify account via `spotify.com/pair`, and anyone with the link can tune in live through a browser.
 
-- **Listen-along or archive**: Public playback (`/player` and `/stream`) is disabled by default. Keep it off to cache/archive what you listen to, or flip the toggle in `/admin` to open the stream to listeners.
-- **Native pairing**: Authorize directly via RFC 8628 (`spotify.com/pair`) in the admin dashboard, with no Spotify developer app or cookies required.
-- **Audio pipeline**: Caches tracks via librespot (Spotify Premium) or yt-dlp/YouTube fallback (Free), encoded to Opus over an Ogg pipe with instant burst buffering. Optional ReplayGain 2.0 normalization via `rsgain`.
-- **Live desktop capture (`togedemon`)**: Optional companion daemon for Linux desktops. Captures Spotify's audio stream directly via PulseAudio/PipeWire for zero-mismatch live playback (ideal for Free accounts).
+- **Listen-along or archive**: Public playback (`/player` and `/stream`) and disk caching are both off by default. Turn on **Player** to stream (preparing tracks in memory when disk caching is off), turn on **Cache played tracks to disk** to archive what you play and manage it via **View cache**, or keep both off to use Direct download without polling Spotify.
+- **Native pairing**: Authorize via RFC 8628 (`spotify.com/pair`) in `/admin`, with no Spotify developer app required.
+- **Audio & tagging**: Fetches tracks via librespot (Spotify Premium) or yt-dlp/YouTube (Free/unpaired), encodes to Opus over Ogg with burst buffering, embeds clean metadata and 1:1 cover art into every file regardless of Spotify auth, and optionally applies ReplayGain 2.0 normalization via `rsgain`.
+- **Direct download**: Download Spotify or YouTube tracks, albums, and playlists from `/admin` (even without pairing Spotify) with pause/resume/early stop, background completion, and automatic metadata and cover art tagging.
 
 ---
 
@@ -13,7 +13,7 @@ Self-hosted Spotify listen-along. Run `togewire` on a server, pair your Spotify 
 
 ### 1. Run via Podman / Docker (Recommended)
 
-togewire keeps its config and cache in `configs/` and `data/`, which must belong to the user it runs as: `1000:1000` in `compose.yaml` and below, or your own `id -u`:`id -g` if those differ. Create both folders before the first start, or Docker creates them owned by root.
+togewire keeps its config and cache in `configs/` and `data/`, which must belong to the user it runs as: `1000:1000` in `compose.yaml`, or your own `id -u`:`id -g` if those differ. Create both folders before the first start, or Docker creates them owned by root.
 
 ```bash
 mkdir -p configs data
@@ -21,14 +21,7 @@ podman compose up -d   # rootless Podman: uncomment userns_mode in compose.yaml
 # or: docker compose up -d
 ```
 
-Or run directly:
-```bash
-# Podman, rootless (SELinux compatible)
-podman run -d --name togewire --init --user 1000:1000 --userns=keep-id -p 7093:7093 -v ./configs:/app/configs:Z -v ./data:/app/data:Z ghcr.io/kurodaze/togewire:latest
-
-# Docker
-docker run -d --name togewire --init --user 1000:1000 --add-host=host.docker.internal:host-gateway -p 7093:7093 -v ./configs:/app/configs -v ./data:/app/data ghcr.io/kurodaze/togewire:latest
-```
+`compose.dev.yaml` builds the image from the checkout instead, with the faster-to-build dev profile.
 
 To give the container YouTube cookies (required for VPS/datacenter IPs, or for yt-dlp on Free accounts and fallback), stream them into the data volume:
 ```bash
@@ -40,7 +33,7 @@ togewire automatically detects `cookies.txt` (or any `*cookie*.txt`) in `data/`,
 
 ### 2. Or Install Native Binary
 
-Download pre-built static `togewire` / `togedemon` binaries (`-x86_64` / `-aarch64`) from [GitHub Releases](https://github.com/kurodaze/togewire/releases) and check them with `sha256sum -c --ignore-missing SHA256SUMS`, or build both from source:
+Download a static `togewire` binary (`-x86_64` / `-aarch64`) from [GitHub Releases](https://github.com/kurodaze/togewire/releases) and check it with `sha256sum -c --ignore-missing SHA256SUMS`, or build it from source:
 
 ```bash
 # Runtime: ffmpeg, plus rsgain if normalization is on. yt-dlp, and deno unless one is on
@@ -48,7 +41,7 @@ Download pre-built static `togewire` / `togedemon` binaries (`-x86_64` / `-aarch
 sudo apt install ffmpeg rsgain
 git clone https://github.com/kurodaze/togewire.git
 cd togewire
-./scripts/build.sh --release
+./scripts/build.sh --release   # a static ./togewire, see --help
 ./togewire --port 7093 --host 0.0.0.0
 ```
 
@@ -72,26 +65,8 @@ journalctl --user -u togewire -f
 
 1. Copy the one-time setup token printed to the terminal logs on first run.
 2. Open `http://localhost:7093/admin/login`, enter the token, and set your admin password.
-3. In the admin dashboard, click **Pair with Spotify** and confirm authorization in the Spotify tab.
+3. In the admin dashboard, click **Pair Spotify** in the header and confirm authorization in the Spotify tab.
 4. When you're ready for listeners, turn on the **Player** switch at the top of `/admin` to enable `/player`.
-
----
-
-## togedemon (Optional Live Capture)
-
-`togedemon` runs on your Linux desktop where Spotify is playing. It isolates Spotify's audio via PulseAudio/PipeWire and streams it directly to your togewire server with minimal latency (bypassing YouTube matching on Free accounts). togedemon is not containerized but it can work with a togewire server container. It needs `ffmpeg`, `pactl` and `parec` (`pulseaudio-utils`; PipeWire via `pipewire-pulse`) on the desktop.
-
-Live audio takes priority while connected. togewire continues pre-caching tracks in the background so the cache stays warm for seamless fallback if `togedemon` disconnects.
-
-```bash
-TOGEDEMON_TOKEN=<token> ./togedemon --server https://togewire.example.com
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--server` | *(required)* | togewire server URL |
-| `--token` / `TOGEDEMON_TOKEN` | *(required)* | Bearer token from the togedemon section in `/admin`; prefer the env var, since other local users can read process arguments |
-| `--quality` | `144k` | Opus bitrate (`112k`, `144k`, `192k`, `256k`) |
 
 ---
 
@@ -101,36 +76,34 @@ Place togewire behind a reverse proxy (such as [KDNX](https://github.com/kurodaz
 
 Key options in `configs/config.json` (also adjustable in `/admin`):
 - `player_enabled` (`false`): Enable public player at `/player` and `/stream`.
-- `cache_max_mb` (`2048`): Maximum disk cache size in `data/track_cache/`. *(To use an external drive or NFS share, symlink it: `ln -s /mnt/nas/music data/track_cache`)*.
-- `audio_bitrate` (`144k`): Opus VBR bitrate for caching tracks (`112k`, `144k`, `192k`, `256k`); YouTube's own Opus is kept as it is.
-- `low_data_streaming` (`false`): Streams 112k copies for tracks cached above High (> 144k).
+- `cache_enabled` (`false`): Save tracks played on Spotify to disk in `data/track_cache/`. When off, the player prepares tracks in memory (`/dev/shm`) only; when both `player_enabled` and `cache_enabled` are `false`, Spotify playback is not polled.
+- `audio_source` (`spotify`): Source for played/cached tracks when paired with Premium (`spotify` or `youtube`; Direct download has its own independent source selector).
+- `cache_max_mb` (`2048`): Maximum disk cache size in `data/track_cache/`. *(To use an external drive or NFS share, symlink it: `ln -s /mnt/nas/music data/track_cache`)*. Use **View cache** in `/admin` to browse, search, filter by quality/source, inspect cover art, and download (single `.ogg` or `.zip`) or delete cached tracks (including Shift+click range selection).
+- `audio_bitrate` (`144k`): Opus VBR bitrate for newly prepared tracks (`112k`, `144k`, `192k`); YouTube's own Opus is kept as it is.
+- `low_data_streaming` (`false`): Streams 112k copies for any track prepared above 112k (including 144k, 192k, and YouTube's ~160k Opus).
 - `normalization` (`off`): `stream` normalizes streams in memory without touching cached files; `cache` tags newly cached files with ReplayGain 2.0 without re-encoding.
-- `togematch_api` (empty): optional [togematch-api](https://github.com/kurodaze/togematch) on your network, e.g. `http://192.168.1.10:7094` (or `http://host.docker.internal:7094` if togewire runs in Docker and togematch-api is on the host or in an independent container publishing `7094:7094`; or `http://togematch-api:7094` if sharing a Docker network). It picks the YouTube video for yt-dlp tracks and keeps its matches, shared with your other apps and fixable by hand.
-- `cover_art` (`640`): `640` embeds the largest cover Spotify's metadata lists; `original` embeds the cover as uploaded (often 1400 to 3000 px, a few hundred KB more per track) and falls back to 640 (config file only).
+- `togematch_api` (empty): optional [togematch-api](https://github.com/kurodaze/togematch) on your network, e.g. `http://192.168.1.10:7094` (or `http://host.docker.internal:7094` if togewire runs in Docker and togematch-api is on the host or in an independent container publishing `7094:7094`; or `http://togematch-api:7094` if sharing a Docker network). It picks the YouTube video for yt-dlp tracks and keeps its matches.
+- `cover_art` (`640`): `640` embeds the largest cover Spotify's metadata lists; `1280` fetches the original uploaded cover and downscales it to at most 1280 px; `original` embeds the cover as uploaded (often 1400 to 3000 px, a few hundred KB more per track) and falls back to 640 (config file only).
 - `log_level` (`info`): `trace`, `debug`, `info`, `warn` or `error` (config file only).
 
-### Audio Pipeline & Quality Architecture
+### Audio, Metadata & Cover Art
 
-- **Spotify Sourcing**: Librespot automatically requests the highest available stream from Spotify:
-  - togewire takes the best format Spotify's key server grants the account: the bit-perfect FLAC stream (up to 24-bit) with **Lossless**, else 320 kbps Vorbis, else lower on plans capped lower.
-  - Lossless comes with Premium in most markets, and only with Premium Platinum where Spotify sells Lite, Standard and Platinum plans.
-  - A format Spotify refuses the account is skipped for the rest of the session.
-- **Spotify as Source of Truth for Metadata & Cover Art**:
-  - Track title, every credited artist, album name, album artist, release year, track number, and disc number are **always sourced directly from Spotify** (Spotify's track metadata API and librespot, with Connect state as a fallback).
-  - The official album cover is fetched directly from Spotify's CDN at 640px, or as uploaded with `cover_art` set to `original`, with Spotify's public oEmbed (300px) as a fallback when it's missing or fails to download. It's embedded as downloaded, never re-encoded.
-  - Even when audio is fetched via `yt-dlp` (e.g. Free accounts), all YouTube video titles, channel names, descriptions, and video thumbnails are completely ignored and discarded. The audio stream is remuxed/encoded with official Spotify metadata and cover art embedded into the `.ogg` Vorbis comments.
-- **Always Cached as Opus**: Tracks are cached as Opus VBR (`.ogg`) for optimal quality and storage efficiency. Sourcing directly from lossless FLAC avoids generational compression loss.
-- **Cache Quality Tiers**:
-  - `112k`: Normal (112 kbps Opus VBR)
-  - `144k`: High (144 kbps Opus VBR), **recommended and the default**
-  - `192k`: Very High (192 kbps Opus VBR)
-  - `256k`: Max (256 kbps Opus VBR)
-- **Opus VBR**: Bitrates are average targets (`-vbr on`); complex tracks scale higher dynamically.
-- **Low-Data Streaming** (`low_data_streaming`): Tracks cached at > 144k stream from a 112k in-memory copy (`/dev/shm`, up to 3 copies, ~12 MB RAM), transcoded once and reused by seeks and replays; extra CPU per transcode, and copies stay in RAM to avoid disk wear. With `normalization` set to `stream`, the copy is encoded from normalized audio: same RAM as either feature alone.
-- **yt-dlp Stream Copy**: YouTube's native ~160 kbps Opus audio streams (format 251) are remuxed directly with Spotify metadata and cover art without re-encoding.
-- **Audio Normalization**: In `/admin`, choose between **Off**, **Stream only** (`stream`), or **Cache to disk** (`cache`):
-  - **Stream only**: Normalizes in memory via `rsgain` (−14 LUFS / −1 dBTP) without modifying cached files; the next queue track is pre-normalized in the background. Almost no CPU, extra RAM.
-  - **Cache to disk**: Tags newly cached files with ReplayGain 2.0 via `rsgain` without re-encoding. Lossless and fully reversible.
+- **Spotify audio (`librespot`)**: Requests the highest format Spotify's key server grants the account: bit-perfect FLAC (up to 24-bit) on Lossless-eligible Premium plans, else 320 kbps Ogg Vorbis, else lower. Formats refused by the plan are skipped for the rest of the session.
+- **YouTube audio (`yt-dlp`)**: Remuxes YouTube's native Opus stream without re-encoding, discarding YouTube's own title, uploader, and thumbnail when catalogue metadata is available.
+- **Opus caching**: Cached tracks are stored as Opus VBR (`.ogg`, `-vbr on`) at `audio_bitrate` (`112k` Normal, `144k` High default, `192k` Very High). Sourcing from lossless FLAC avoids generational loss.
+- **Low-data & normalization**: `low_data_streaming` keeps up to 3 transcoded 112k copies in `/dev/shm` (~12 MB RAM) for any track cached above `112k`. `normalization = "stream"` runs `rsgain` (−14 LUFS / −1 dBTP) in memory and pre-normalizes the next queued track; `"cache"` writes lossless ReplayGain 2.0 tags to newly cached files.
+- **Metadata & cover art (works with or without Spotify auth)**: Every cached or downloaded file is tagged with title, credited artists, album, album artist, release year, track/disc numbers, and embedded 1:1 front cover art (`METADATA_BLOCK_PICTURE`):
+  - **Spotify tracks**: Always use official Spotify metadata and 1:1 album art (spclient metadata API when paired, or Spotify's public embed page + oEmbed when unpaired; upgraded per `cover_art`).
+  - **YouTube tracks**: Matched against `togematch-api` (when configured, skipped for official `"Provided to YouTube by"` Art Tracks), Spotify (when paired), and public Deezer / iTunes Search (when unpaired) for canonical metadata and high-res 1:1 album art. For YouTube-only uploads (bootlegs, remixes), symmetric outer black bars are trimmed and the thumbnail is center-cropped to a 1:1 JPEG.
+
+### Direct Download (`/admin`)
+
+Available in `/admin` even without pairing Spotify:
+
+- **Accepted links**: Spotify tracks, albums, and playlists (`open.spotify.com/{track,album,playlist}/...` or `spotify:{track,album,playlist}:...`), plus YouTube and YouTube Music videos, albums, and playlists (`youtube.com/watch`, `youtu.be`, `youtube.com/playlist`, `music.youtube.com/browse`).
+- **Source & quality**: With Spotify Premium paired (`librespot` enabled), choose **Spotify** or **YouTube** for Spotify links (independent of `audio_source`), and pick **Max** (raw FLAC or 320 kbps Ogg Vorbis, no re-encoding) or an Opus VBR tier (`112k`–`192k`). For YouTube links or when unpaired/Free, audio comes from `yt-dlp` (`bestaudio/best`, using `togematch-api` when configured) and native Opus is remuxed losslessly.
+- **Tagging & normalization**: Every file gets full metadata and 1:1 cover art as described above (regardless of Spotify auth), plus an optional **Normalize** toggle for ReplayGain 2.0 (−14 LUFS / −1 dBTP) via `rsgain`.
+- **Queue & staging**: Runs sequentially (up to 20 jobs, 500 tracks per album/playlist) with **Pause**/**Resume**, **Stop** (packages tracks finished so far), and **Remove**/**Cancel**/**Dismiss**. Multi-track jobs are packaged into an uncompressed (`STORE`) `.zip` in `data/track_cache/manual-<id>.ytwork/` (so large downloads use `data/` rather than RAM/`/tmp`). Ready files stay downloadable after closing the browser until dismissed, after 48 hours, or on restart.
 
 ---
 

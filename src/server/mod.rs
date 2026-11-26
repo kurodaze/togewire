@@ -6,13 +6,13 @@ pub mod workers;
 use axum::{
     Form, Json, Router,
     body::{Body, Bytes},
-    extract::{ConnectInfo, Path, State, ws::Utf8Bytes, ws::WebSocketUpgrade},
+    extract::{ConnectInfo, Path, Query, State, ws::Utf8Bytes, ws::WebSocketUpgrade},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Redirect, Response, sse},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use futures_util::{Stream, StreamExt, stream::BoxStream};
 use parking_lot::{Mutex, RwLock};
 use rust_embed::Embed;
 use serde::Deserialize;
@@ -24,15 +24,14 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use subtle::ConstantTimeEq;
 use tera::Tera;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
-use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::audio::TrackPreparer;
+use crate::audio::manual_download::{ManualDownloadManager, ManualDownloadSource};
 use crate::cache::Manager as CacheManager;
 use crate::config;
 use crate::spotify::SpotifyClient;
@@ -52,21 +51,6 @@ const MAX_WS_MESSAGE_SIZE: usize = 512;
 #[folder = "web/"]
 struct Asset;
 
-/// Real-time event pushed to togedemon via SSE.
-#[derive(Clone, serde::Serialize)]
-pub struct TogedemonEvent {
-    pub is_playing: bool,
-}
-
-impl TogedemonEvent {
-    fn new(s: Option<&SpotifyState>) -> Self {
-        Self {
-            is_playing: config::get().read().player_enabled
-                && s.is_some_and(|s| s.track.is_some() && s.is_playing),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct AppState {
     /// Latest Spotify poll; `None` while nothing is playing.
@@ -74,20 +58,13 @@ pub struct AppState {
     pub spotify_client: SpotifyClient,
     pub stream_manager: StreamManager,
     pub preparer: Arc<TrackPreparer>,
+    pub manual_downloads: Arc<ManualDownloadManager>,
     pub ws_clients: Arc<RwLock<HashMap<u64, mpsc::Sender<Utf8Bytes>>>>,
     pub tera: Arc<Tera>,
     pub shutdown: CancellationToken,
-    /// Cancels the connected togedemon; `Some` exactly while one is live.
-    pub togedemon_cancel: Arc<Mutex<Option<CancellationToken>>>,
-    pub togedemon_events: broadcast::Sender<TogedemonEvent>,
 }
 
 impl AppState {
-    #[must_use]
-    pub fn togedemon_live(&self) -> bool {
-        self.togedemon_cancel.lock().is_some()
-    }
-
     #[must_use]
     pub fn current(&self) -> Option<SpotifyState> {
         self.current.read().clone()
@@ -101,12 +78,11 @@ pub fn create_server() -> (Router, AppState) {
         current: Arc::default(),
         stream_manager: StreamManager::new(Arc::clone(&cache)),
         preparer: Arc::new(TrackPreparer::new(spotify_client.clone(), cache)),
+        manual_downloads: Arc::default(),
         spotify_client,
         ws_clients: Arc::default(),
         tera: Arc::new(load_templates()),
         shutdown: CancellationToken::new(),
-        togedemon_cancel: Arc::default(),
-        togedemon_events: broadcast::channel(16).0,
     };
     (build_router(state.clone()), state)
 }
@@ -156,7 +132,40 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/disconnect", post(handle_admin_disconnect))
         .route("/admin/player", post(handle_admin_player))
         .route("/admin/cache", post(handle_admin_cache))
-        .route("/admin/cache/clear", post(handle_admin_cache_clear))
+        .route("/admin/togematch", post(handle_admin_togematch))
+        .route("/admin/cache/list", get(handle_admin_cache_list))
+        .route(
+            "/admin/cache/delete-many",
+            post(handle_admin_cache_delete_many),
+        )
+        .route("/admin/cache/download", post(handle_admin_cache_download))
+        .route("/admin/cache/{id}/file", get(handle_admin_cache_file))
+        .route("/admin/cache/{id}/cover", get(handle_admin_cache_cover))
+        .route("/admin/cache/{id}/delete", post(handle_admin_cache_delete))
+        .route(
+            "/admin/download",
+            get(handle_admin_manual_download_current).post(handle_admin_manual_download_start),
+        )
+        .route(
+            "/admin/download/{id}/pause",
+            post(handle_admin_manual_download_pause),
+        )
+        .route(
+            "/admin/download/{id}/resume",
+            post(handle_admin_manual_download_resume),
+        )
+        .route(
+            "/admin/download/{id}/stop",
+            post(handle_admin_manual_download_stop),
+        )
+        .route(
+            "/admin/download/{id}/cancel",
+            post(handle_admin_manual_download_cancel),
+        )
+        .route(
+            "/admin/download/{id}/file",
+            get(handle_admin_manual_download_file),
+        )
         .route_layer(middleware::from_fn(require_admin));
     Router::new()
         .route("/", get(handle_root))
@@ -164,8 +173,6 @@ fn build_router(state: AppState) -> Router {
         .route("/ping", get(handle_ping))
         .route("/stream", get(handle_stream))
         .route("/ws", get(handle_ws))
-        .route("/togedemon/push", post(handle_togedemon_push))
-        .route("/togedemon/events", get(handle_togedemon_events))
         .route(
             "/admin/login",
             get(handle_admin_login).post(handle_admin_login_post),
@@ -279,17 +286,6 @@ fn is_trusted_proxy(ip: IpAddr) -> bool {
     }
 }
 
-fn valid_togedemon_token(headers: &HeaderMap) -> bool {
-    let provided = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    let cfg = config::get().read();
-    !cfg.togedemon_token.is_empty()
-        && bool::from(provided.as_bytes().ct_eq(cfg.togedemon_token.as_bytes()))
-}
-
 /// The key rate limits and connection caps count by. IPv6 counts per /64: one client
 /// holds a whole prefix, so a per-address limit would limit nothing.
 fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> String {
@@ -367,7 +363,8 @@ fn render(state: &AppState, name: &str, ctx: &tera::Context) -> Response {
 }
 
 fn player_disabled() -> Option<Response> {
-    (!config::get().read().player_enabled)
+    let cfg = config::get().read();
+    (!cfg.player_enabled || !cfg.is_authenticated())
         .then(|| (StatusCode::SERVICE_UNAVAILABLE, "player disabled").into_response())
 }
 
@@ -375,23 +372,20 @@ async fn handle_root() -> Redirect {
     let cfg = config::get().read();
     Redirect::to(if !cfg.has_admin_password() {
         "/admin/login"
-    } else if cfg.player_enabled {
+    } else if cfg.player_enabled && cfg.is_authenticated() {
         "/player"
     } else {
         "/admin"
     })
 }
 
-async fn handle_dashboard(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
+async fn handle_dashboard(State(state): State<AppState>) -> Response {
     let mut ctx = tera::Context::new();
     {
         let cfg = config::get().read();
-        ctx.insert("authenticated", &cfg.is_authenticated());
-        ctx.insert("player_enabled", &cfg.player_enabled);
+        let authenticated = cfg.is_authenticated();
+        ctx.insert("authenticated", &authenticated);
+        ctx.insert("player_enabled", &(cfg.player_enabled && authenticated));
         ctx.insert("use_librespot", &config::use_librespot());
         let plan = match config::premium() {
             Some(true) => "premium",
@@ -399,18 +393,13 @@ async fn handle_dashboard(
             None => "unknown",
         };
         ctx.insert("plan", plan);
-        ctx.insert("togedemon_token", &cfg.togedemon_token);
-        ctx.insert("audio_bitrate", &cfg.audio_bitrate);
+        ctx.insert("cache_enabled", &cfg.cache_enabled);
+        ctx.insert("audio_source", &cfg.audio_source);
+        ctx.insert("audio_bitrate", &config::audio_bitrate());
         ctx.insert("low_data_streaming", &cfg.low_data_streaming);
         ctx.insert("normalization", &cfg.normalization);
         ctx.insert("togematch_api", &cfg.togematch_api);
     }
-    let togedemon_bin = if cfg!(debug_assertions) {
-        "togedemon-dev"
-    } else {
-        "togedemon"
-    };
-    ctx.insert("togedemon_bin", togedemon_bin);
 
     let (used_bytes, max_bytes, entries) = state.preparer.cache.stats();
     ctx.insert(
@@ -419,18 +408,6 @@ async fn handle_dashboard(
     );
     ctx.insert("cache_max_mb", &(max_bytes / (1024 * 1024)));
     ctx.insert("cache_entries", &entries);
-
-    // The URL the admin actually typed, for the copyable togedemon command.
-    let proto = if is_request_secure(&headers, peer) {
-        "https"
-    } else {
-        "http"
-    };
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:7093");
-    ctx.insert("server_url", &format!("{proto}://{host}"));
 
     render(&state, "dashboard.html", &ctx)
 }
@@ -449,9 +426,12 @@ async fn handle_player() -> Response {
 
 async fn handle_ping(State(state): State<AppState>) -> Json<serde_json::Value> {
     let now = crate::now_unix();
-    // Playback is only public while the player is on; otherwise this stays a health check.
-    if !config::get().read().player_enabled {
-        return Json(json!({ "status": "ok", "timestamp": now }));
+    // Playback is only public while the player is on and Spotify is paired; otherwise a health check.
+    {
+        let cfg = config::get().read();
+        if !cfg.player_enabled || !cfg.is_authenticated() {
+            return Json(json!({ "status": "ok", "timestamp": now }));
+        }
     }
     let current = state.current();
     let track = current.as_ref().and_then(|s| s.track.as_ref());
@@ -492,7 +472,7 @@ async fn handle_stream(
 
     // Cached headers + burst first so playback starts instantly; lagged pages are skipped.
     let shutdown = state.shutdown.clone();
-    let body = futures::stream::iter(prefix)
+    let body = futures_util::stream::iter(prefix)
         .chain(BroadcastStream::new(rx).filter_map(|r| std::future::ready(r.ok())))
         .map(Ok)
         .take_until(async move {
@@ -524,7 +504,7 @@ struct ListenerStream {
     ip: String,
 }
 
-impl futures::Stream for ListenerStream {
+impl Stream for ListenerStream {
     type Item = io::Result<Bytes>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -538,88 +518,6 @@ impl Drop for ListenerStream {
         with_peer(&self.ip, |p| p.streams = p.streams.saturating_sub(1));
         workers::rebroadcast(&self.state);
     }
-}
-
-/// GET /togedemon/events - SSE feed of track updates for togedemon.
-async fn handle_togedemon_events(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !valid_togedemon_token(&headers) {
-        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
-    }
-    let initial = TogedemonEvent::new(state.current.read().as_ref());
-    let live = BroadcastStream::new(state.togedemon_events.subscribe())
-        .filter_map(|r| std::future::ready(r.ok()));
-    let shutdown = state.shutdown.clone();
-    let events = futures::stream::once(std::future::ready(initial))
-        .chain(live)
-        .map(|e| {
-            let data = serde_json::to_string(&e).unwrap_or_default();
-            Ok::<_, std::convert::Infallible>(
-                sse::Event::default().event("track_update").data(data),
-            )
-        })
-        .take_until(async move { shutdown.cancelled().await });
-    sse::Sse::new(events)
-        .keep_alive(sse::KeepAlive::default())
-        .into_response()
-}
-
-/// POST /togedemon/push - a raw Ogg/Opus stream from the togedemon binary.
-async fn handle_togedemon_push(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    body: Body,
-) -> Response {
-    if !valid_togedemon_token(&headers) {
-        warn!("Togedemon push rejected: bad token from {}", peer.ip());
-        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
-    }
-    if let Some(off) = player_disabled() {
-        return off;
-    }
-    let ip = client_ip(&headers, peer);
-
-    // The newest togedemon wins. Tokens are swapped and cancelled under one lock, so
-    // "cancelled" always means "no longer the live one".
-    let cancel = CancellationToken::new();
-    {
-        let mut slot = state.togedemon_cancel.lock();
-        if let Some(old) = slot.replace(cancel.clone()) {
-            info!("Togedemon from {ip} takes over from the previous connection");
-            old.cancel();
-        }
-    }
-    info!("Togedemon connected from {ip}");
-    let pipe = state.stream_manager.play_live();
-    workers::rebroadcast(&state);
-
-    let reader = StreamReader::new(body.into_data_stream().map_err(io::Error::other));
-    tokio::select! {
-        () = cancel.cancelled() => {}
-        res = stream::pump_ogg(reader, 0, false, &pipe) => {
-            if let Err(e) = res {
-                debug!("Togedemon stream from {ip} ended: {e}");
-            }
-        }
-    }
-
-    {
-        let mut slot = state.togedemon_cancel.lock();
-        if cancel.is_cancelled() {
-            debug!("Togedemon from {ip} superseded");
-            return StatusCode::OK.into_response();
-        }
-        *slot = None;
-    }
-    info!("Togedemon disconnected from {ip}");
-    state.stream_manager.stop();
-    // Fall back to the cache: the current track if cached, else quiet until prepared.
-    if let Some(current) = state.current()
-        && let Some(track) = &current.track
-    {
-        workers::switch_track(&state, &current, track);
-    }
-    StatusCode::OK.into_response()
 }
 
 async fn handle_ws(
@@ -745,11 +643,13 @@ async fn handle_admin_login_post(
             return login_page(&state, "password", token, "Failed to save password");
         }
         auth::clear_setup_token();
+        info!("Admin password configured");
     } else if !auth::verify_password(admin_hash, form.password).await {
         return login_page(&state, "login", "", "Invalid password");
     }
 
     auth::clear_failed_attempts(&ip);
+    info!("Admin logged in from {ip}");
     let token = auth::session_token(&config::get().read().admin_password_hash);
     let cookie = auth::session_cookie(is_request_secure(&headers, peer), &token);
     ([(header::SET_COOKIE, cookie)], Redirect::to("/admin")).into_response()
@@ -792,24 +692,42 @@ async fn handle_admin_pair_poll(
     })
 }
 
+fn stop_player(state: &AppState) {
+    state.stream_manager.stop();
+    state.preparer.cache.clear_mem();
+    // Sockets opened while the player was on would otherwise keep receiving
+    // track_update; the upgrade gate only covers new connections.
+    state.ws_clients.write().clear();
+}
+
 async fn handle_admin_disconnect(State(state): State<AppState>) -> Redirect {
     state.spotify_client.clear_session().await;
     state.preparer.reset_librespot().await;
     config::set_use_librespot(false);
     config::set_premium(None);
-    info!("Spotify disconnected by admin");
+    if config::get().read().player_enabled {
+        if let Err(e) = config::update(|cfg| cfg.player_enabled = false) {
+            error!("Failed to disable player on disconnect: {e}");
+        } else {
+            info!("Player disabled");
+        }
+        stop_player(&state);
+    }
+    info!("Spotify disconnected");
     Redirect::to("/admin?n=disconnected")
 }
 
 #[derive(Deserialize)]
 struct CacheForm {
+    /// A checkbox: sent only when on.
+    cache_enabled: Option<String>,
+    /// Sent only when Premium + librespot are available.
+    audio_source: Option<config::AudioSource>,
     cache_max_mb: u64,
     audio_bitrate: String,
     normalization: config::Normalization,
     /// A checkbox: sent only when on.
     low_data_streaming: Option<String>,
-    #[serde(default)]
-    togematch_api: String,
 }
 
 async fn handle_admin_cache(
@@ -819,27 +737,150 @@ async fn handle_admin_cache(
     if !config::AUDIO_BITRATES.contains(&form.audio_bitrate.as_str()) {
         return Redirect::to("/admin?n=bad_bitrate");
     }
-    let togematch_api = form.togematch_api.trim().trim_end_matches('/').to_string();
-    if !(togematch_api.is_empty()
-        || togematch_api.starts_with("http://")
-        || togematch_api.starts_with("https://"))
-    {
-        return Redirect::to("/admin?n=bad_togematch_api");
-    }
     let mb = form.cache_max_mb.max(64);
+    let cache_enabled = form.cache_enabled.is_some();
+    let low_data_streaming = form.low_data_streaming.is_some();
+    let prev = {
+        let cfg = config::get().read();
+        (
+            cfg.cache_enabled,
+            cfg.audio_source,
+            cfg.cache_max_mb,
+            cfg.audio_bitrate.clone(),
+            cfg.normalization,
+            cfg.low_data_streaming,
+        )
+    };
+    let next_source = form.audio_source.unwrap_or(prev.1);
     let saved = config::update(|cfg| {
+        cfg.cache_enabled = cache_enabled;
+        cfg.audio_source = next_source;
         cfg.cache_max_mb = mb;
-        cfg.audio_bitrate = form.audio_bitrate;
+        cfg.audio_bitrate = form.audio_bitrate.clone();
         cfg.normalization = form.normalization;
-        cfg.low_data_streaming = form.low_data_streaming.is_some();
-        cfg.togematch_api = togematch_api;
+        cfg.low_data_streaming = low_data_streaming;
     });
     if let Err(e) = saved {
-        error!("Failed to save cache settings: {e}");
+        error!("Failed to save settings: {e}");
         return Redirect::to("/admin?n=save_failed");
+    }
+    if cache_enabled != prev.0 {
+        info!(
+            "Disk cache {}",
+            if cache_enabled { "enabled" } else { "disabled" }
+        );
+    }
+    if next_source != prev.1 {
+        let label = match next_source {
+            config::AudioSource::Spotify => "Spotify",
+            config::AudioSource::Youtube => "YouTube",
+        };
+        info!("Audio source set to {label}");
+    }
+    if form.audio_bitrate != prev.3 {
+        info!("Audio quality set to {}", form.audio_bitrate);
+    }
+    if form.normalization != prev.4 {
+        let label = match form.normalization {
+            config::Normalization::Off => "off",
+            config::Normalization::Stream => "stream",
+            config::Normalization::Cache => "cache",
+        };
+        info!("Normalization set to {label}");
+    }
+    if low_data_streaming != prev.5 {
+        info!(
+            "Low data streaming {}",
+            if low_data_streaming {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+    if mb != prev.2 {
+        info!("Cache limit set to {mb} MB");
     }
     state.preparer.cache.set_max_mb(mb);
     Redirect::to("/admin?n=saved")
+}
+
+#[derive(Deserialize)]
+struct TogematchForm {
+    #[serde(default)]
+    togematch_api: String,
+}
+
+fn is_valid_http_base_url(raw: &str) -> bool {
+    reqwest::Url::parse(raw).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.has_host()
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.query().is_none()
+            && u.fragment().is_none()
+    })
+}
+
+async fn handle_admin_togematch(Form(form): Form<TogematchForm>) -> Redirect {
+    let togematch_api = form.togematch_api.trim().trim_end_matches('/').to_string();
+    if !(togematch_api.is_empty() || is_valid_http_base_url(&togematch_api)) {
+        warn!("Rejected invalid togematch_api address: {togematch_api:?}");
+        return Redirect::to("/admin?n=togematch_failed");
+    }
+    let prev = config::get().read().togematch_api.clone();
+    if let Err(e) = config::update(|cfg| cfg.togematch_api = togematch_api.clone()) {
+        error!("Failed to save togematch_api: {e}");
+        return Redirect::to("/admin?n=save_failed");
+    }
+    if togematch_api != prev {
+        if togematch_api.is_empty() {
+            info!("togematch-api cleared");
+        } else {
+            info!("togematch-api set to {togematch_api}");
+        }
+    }
+    if togematch_api.is_empty() {
+        return Redirect::to("/admin?n=saved");
+    }
+    if probe_togematch_api(&togematch_api).await {
+        Redirect::to("/admin?n=togematch_ok")
+    } else {
+        Redirect::to("/admin?n=togematch_failed")
+    }
+}
+
+/// Probes `base/match?q=` to verify reachability, ACLs, and that the target is togematch-api
+/// without triggering any upstream lookup.
+async fn probe_togematch_api(base: &str) -> bool {
+    let resp = match crate::http()
+        .get(format!("{base}/match"))
+        .query(&[("q", "")])
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("togematch-api probe failed for {base}: {e}");
+            return false;
+        }
+    };
+    let status = resp.status();
+    let body_json = resp.json::<serde_json::Value>().await.ok();
+    let err_msg = body_json
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(serde_json::Value::as_str);
+    if status == StatusCode::BAD_REQUEST && err_msg == Some("q is empty") {
+        true
+    } else {
+        warn!(
+            "togematch-api probe unexpected response from {base}: HTTP {} ({err_msg:?})",
+            status.as_u16()
+        );
+        false
+    }
 }
 
 #[derive(Deserialize)]
@@ -851,6 +892,14 @@ async fn handle_admin_player(
     State(state): State<AppState>,
     Json(body): Json<PlayerBody>,
 ) -> Response {
+    if body.enabled && !config::get().read().is_authenticated() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Pair with Spotify before turning the player on" })),
+        )
+            .into_response();
+    }
+    let prev_enabled = config::get().read().player_enabled;
     if let Err(e) = config::update(|cfg| cfg.player_enabled = body.enabled) {
         error!("Failed to save player_enabled: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -858,28 +907,466 @@ async fn handle_admin_player(
     if body.enabled {
         workers::start_stream_if_playing(&state);
     } else {
-        if let Some(togedemon) = state.togedemon_cancel.lock().take() {
-            togedemon.cancel();
-        }
-        state.stream_manager.stop();
-        // Sockets opened while the player was on would otherwise keep receiving
-        // track_update; the upgrade gate only covers new connections.
-        state.ws_clients.write().clear();
+        stop_player(&state);
     }
-    let _ = state
-        .togedemon_events
-        .send(TogedemonEvent::new(state.current().as_ref()));
-    info!(
-        "Player {}",
-        if body.enabled { "enabled" } else { "disabled" }
-    );
+    if body.enabled != prev_enabled {
+        info!(
+            "Player {}",
+            if body.enabled { "enabled" } else { "disabled" }
+        );
+    }
     Json(json!({ "enabled": body.enabled })).into_response()
 }
 
-async fn handle_admin_cache_clear(State(state): State<AppState>) -> Redirect {
-    state.preparer.cache.clear();
-    info!("Track cache cleared via admin");
-    Redirect::to("/admin?n=cleared")
+async fn handle_admin_cache_list(State(state): State<AppState>) -> Response {
+    let items = state.preparer.cache.list();
+    let (used, _, entries) = state.preparer.cache.stats();
+    Json(json!({
+        "items": items,
+        "used_mb": format!("{:.1}", used as f64 / (1024.0 * 1024.0)),
+        "entries": entries,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct CacheFileQuery {
+    #[serde(default)]
+    inline: Option<String>,
+}
+
+/// Parse a single HTTP byte range (`bytes=start-end`, `bytes=start-`, or `bytes=-suffix`).
+fn parse_byte_range(raw: &str, total: u64) -> Option<(u64, u64)> {
+    if total == 0 {
+        return None;
+    }
+    let spec = raw.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (start_s, end_s) = spec.split_once('-')?;
+    if start_s.is_empty() {
+        let suffix: u64 = end_s.parse().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        let start = total.saturating_sub(suffix);
+        return Some((start, total - 1));
+    }
+    let start: u64 = start_s.parse().ok()?;
+    if start >= total {
+        return None;
+    }
+    let end = if end_s.is_empty() {
+        total - 1
+    } else {
+        end_s.parse::<u64>().ok()?.min(total - 1)
+    };
+    (start <= end).then_some((start, end))
+}
+
+async fn handle_admin_cache_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<CacheFileQuery>,
+    req_headers: HeaderMap,
+) -> Response {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let Some((path, file_name)) = state.preparer.cache.get_disk_entry(&id) else {
+        return (StatusCode::NOT_FOUND, "cached track not found").into_response();
+    };
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let total = file.metadata().await.ok().map(|m| m.len());
+    let kind = if query.inline.is_some() {
+        "inline"
+    } else {
+        "attachment"
+    };
+    let disposition = content_disposition(kind, &file_name);
+
+    if let Some(total) = total
+        && let Some(range_val) = req_headers.get(header::RANGE).and_then(|v| v.to_str().ok())
+    {
+        let Some((start, end)) = parse_byte_range(range_val, total) else {
+            let mut resp = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            if let Ok(val) = HeaderValue::from_str(&format!("bytes */{total}")) {
+                resp.headers_mut().insert(header::CONTENT_RANGE, val);
+            }
+            return resp;
+        };
+        if file.seek(io::SeekFrom::Start(start)).await.is_err() {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        let slice_len = end - start + 1;
+        let stream = tokio_util::io::ReaderStream::new(file.take(slice_len));
+        let mut resp = Response::new(Body::from_stream(stream));
+        *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+        let headers = resp.headers_mut();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/ogg"));
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        if let Ok(val) = HeaderValue::from_str(&disposition) {
+            headers.insert(header::CONTENT_DISPOSITION, val);
+        }
+        if let Ok(val) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")) {
+            headers.insert(header::CONTENT_RANGE, val);
+        }
+        if let Ok(val) = HeaderValue::from_str(&slice_len.to_string()) {
+            headers.insert(header::CONTENT_LENGTH, val);
+        }
+        return resp;
+    }
+
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let mut resp = Response::new(Body::from_stream(stream));
+    let headers = resp.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/ogg"));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Ok(val) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    if let Some(size) = total
+        && let Ok(val) = HeaderValue::from_str(&size.to_string())
+    {
+        headers.insert(header::CONTENT_LENGTH, val);
+    }
+    resp
+}
+
+async fn handle_admin_cache_cover(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some((path, file_name)) = state.preparer.cache.get_disk_entry(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let extracted = tokio::task::spawn_blocking(move || crate::audio::extract_ogg_cover(&path))
+        .await
+        .ok()
+        .flatten();
+    let Some((mime, bytes)) = extracted else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let ext = match mime {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => "jpg",
+    };
+    let stem = std::path::Path::new(&file_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "cover".into());
+    let cover_name = format!("{stem}.{ext}");
+    let disposition = content_disposition("inline", &cover_name);
+    let len = bytes.len();
+    let mut resp = Response::new(Body::from(bytes));
+    let headers = resp.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    if let Ok(val) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    if let Ok(val) = HeaderValue::from_str(&len.to_string()) {
+        headers.insert(header::CONTENT_LENGTH, val);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=3600"),
+    );
+    resp
+}
+
+async fn handle_admin_cache_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let label = state
+        .preparer
+        .cache
+        .get_disk_entry(&id)
+        .and_then(|(path, _)| {
+            path.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| id.clone());
+    let removed = state.preparer.cache.delete(&id);
+    if removed {
+        info!("Cached track deleted: {label}");
+    }
+    let (used, _, entries) = state.preparer.cache.stats();
+    Json(json!({
+        "ok": removed,
+        "used_mb": format!("{:.1}", used as f64 / (1024.0 * 1024.0)),
+        "entries": entries,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct CacheDeleteManyBody {
+    ids: Vec<String>,
+}
+
+async fn handle_admin_cache_delete_many(
+    State(state): State<AppState>,
+    Json(body): Json<CacheDeleteManyBody>,
+) -> Response {
+    let deleted = state.preparer.cache.delete_many(&body.ids);
+    if deleted == 1 {
+        info!("1 cached track deleted");
+    } else if deleted > 1 {
+        info!("{deleted} cached tracks deleted");
+    }
+    let (used, _, entries) = state.preparer.cache.stats();
+    Json(json!({
+        "deleted": deleted,
+        "used_mb": format!("{:.1}", used as f64 / (1024.0 * 1024.0)),
+        "entries": entries,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct CacheDownloadForm {
+    ids: String,
+}
+
+async fn handle_admin_cache_download(
+    State(state): State<AppState>,
+    Form(form): Form<CacheDownloadForm>,
+) -> Response {
+    let ids: Vec<String> = form
+        .ids
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    let paths = state.preparer.cache.get_disk_paths(&ids);
+    if paths.is_empty() {
+        return (StatusCode::NOT_FOUND, "no cached tracks found").into_response();
+    }
+    if paths.len() == 1 {
+        let path = &paths[0];
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "track.ogg".into());
+        let file = match tokio::fs::File::open(path).await {
+            Ok(f) => f,
+            Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        };
+        let len = file.metadata().await.ok().map(|m| m.len());
+        let disposition = content_disposition("attachment", &file_name);
+        let stream = tokio_util::io::ReaderStream::new(file);
+        let mut resp = Response::new(Body::from_stream(stream));
+        let headers = resp.headers_mut();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/ogg"));
+        if let Ok(val) = HeaderValue::from_str(&disposition) {
+            headers.insert(header::CONTENT_DISPOSITION, val);
+        }
+        if let Some(size) = len
+            && let Ok(val) = HeaderValue::from_str(&size.to_string())
+        {
+            headers.insert(header::CONTENT_LENGTH, val);
+        }
+        return resp;
+    }
+
+    let zip_path =
+        std::env::temp_dir().join(format!("togewire-cache-zip-{}.zip", crate::random_hex(8)));
+    let zip_out = zip_path.clone();
+    let built = tokio::task::spawn_blocking(move || {
+        crate::audio::manual_download::write_store_zip(&zip_out, &paths)
+    })
+    .await;
+    if !matches!(built, Ok(Ok(()))) {
+        let _ = tokio::fs::remove_file(&zip_path).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to package archive",
+        )
+            .into_response();
+    }
+
+    let file = match tokio::fs::File::open(&zip_path).await {
+        Ok(f) => f,
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&zip_path).await;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let len = file.metadata().await.ok().map(|m| m.len());
+    // Unlink immediately after opening so the temp zip vanishes as soon as streaming ends.
+    let _ = tokio::fs::remove_file(&zip_path).await;
+
+    let disposition = content_disposition("attachment", "togewire-cache.zip");
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let mut resp = Response::new(Body::from_stream(stream));
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/zip"),
+    );
+    if let Ok(val) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    if let Some(size) = len
+        && let Ok(val) = HeaderValue::from_str(&size.to_string())
+    {
+        headers.insert(header::CONTENT_LENGTH, val);
+    }
+    resp
+}
+
+#[derive(Deserialize)]
+struct ManualDownloadRequest {
+    url: String,
+    #[serde(default)]
+    source: Option<ManualDownloadSource>,
+    #[serde(default = "default_manual_download_quality")]
+    quality: String,
+    #[serde(default)]
+    normalize: bool,
+}
+
+fn default_manual_download_quality() -> String {
+    "max".into()
+}
+
+async fn handle_admin_manual_download_current(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    Json(state.manual_downloads.list_status())
+}
+
+async fn handle_admin_manual_download_start(
+    State(state): State<AppState>,
+    Json(req): Json<ManualDownloadRequest>,
+) -> Response {
+    match state.manual_downloads.start(
+        state.spotify_client.clone(),
+        Arc::clone(&state.preparer),
+        state.shutdown.clone(),
+        &req.url,
+        req.source,
+        &req.quality,
+        req.normalize,
+    ) {
+        Ok(id) => {
+            let list = state.manual_downloads.list_status();
+            Json(json!({ "id": id, "jobs": list["jobs"] })).into_response()
+        }
+        Err(msg) => (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response(),
+    }
+}
+
+async fn handle_admin_manual_download_pause(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if state.manual_downloads.pause(&id) {
+        Json(state.manual_downloads.list_status()).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+async fn handle_admin_manual_download_resume(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if state.manual_downloads.resume(&id) {
+        Json(state.manual_downloads.list_status()).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+async fn handle_admin_manual_download_stop(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if state.manual_downloads.stop(&id) {
+        Json(state.manual_downloads.list_status()).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+async fn handle_admin_manual_download_cancel(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    state.manual_downloads.cancel(&id);
+    Json(state.manual_downloads.list_status()).into_response()
+}
+
+async fn handle_admin_manual_download_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(ready) = state.manual_downloads.get_ready_file(&id) else {
+        return (StatusCode::NOT_FOUND, "download not found").into_response();
+    };
+    let file = match tokio::fs::File::open(&ready.file_path).await {
+        Ok(f) => f,
+        Err(_) => {
+            state.manual_downloads.cancel(&id);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let len = file.metadata().await.ok().map(|m| m.len());
+    let disposition = content_disposition("attachment", &ready.download_name);
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let mut resp = Response::new(Body::from_stream(stream));
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(ready.content_type),
+    );
+    if let Ok(val) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, val);
+    }
+    if let Some(size) = len
+        && let Ok(val) = HeaderValue::from_str(&size.to_string())
+    {
+        headers.insert(header::CONTENT_LENGTH, val);
+    }
+    resp
+}
+
+/// RFC 6266 / 5987 Content-Disposition header with ASCII fallback and UTF-8 `filename*`.
+fn content_disposition(kind: &str, name: &str) -> String {
+    use std::fmt::Write;
+    let ascii: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() && c != '"' && c != '\\' {
+                c
+            } else if c.is_whitespace() {
+                ' '
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut encoded = String::with_capacity(name.len() * 2);
+    for b in name.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(b));
+            }
+            _ => {
+                let _ = write!(encoded, "%{b:02X}");
+            }
+        }
+    }
+    format!("{kind}; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
 }
 
 pub fn start_workers(state: &AppState) {
@@ -936,5 +1423,19 @@ mod tests {
         for ip in ["203.0.113.1", "::ffff:203.0.113.1", "8.8.8.8"] {
             assert!(!is_trusted_proxy(ip.parse().unwrap()), "{ip}");
         }
+    }
+
+    #[test]
+    fn byte_range_parser_handles_standard_ranges() {
+        assert_eq!(parse_byte_range("bytes=0-99", 1000), Some((0, 99)));
+        assert_eq!(parse_byte_range("bytes=500-", 1000), Some((500, 999)));
+        assert_eq!(parse_byte_range("bytes=500-5000", 1000), Some((500, 999)));
+        assert_eq!(parse_byte_range("bytes=-100", 1000), Some((900, 999)));
+        assert_eq!(parse_byte_range("bytes=-5000", 1000), Some((0, 999)));
+        assert_eq!(parse_byte_range("bytes=1000-", 1000), None);
+        assert_eq!(parse_byte_range("bytes=50-10", 1000), None);
+        assert_eq!(parse_byte_range("bytes=-0", 1000), None);
+        assert_eq!(parse_byte_range("bytes=0-10, 20-30", 1000), None);
+        assert_eq!(parse_byte_range("bytes=0-0", 0), None);
     }
 }

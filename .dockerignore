@@ -5,7 +5,6 @@ target/
 data/
 configs/config.json
 togewire*
-togedemon*
 *.tmp
 *.log
 .DS_Store

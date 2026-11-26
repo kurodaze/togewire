@@ -18,12 +18,12 @@ usage() {
     cat <<'EOF'
 Usage: ./scripts/build.sh [--clean] [--release|--dev] [--arch x86_64|aarch64]
 
-Builds togewire and togedemon as statically linked (musl) binaries.
+Builds togewire as a statically linked (musl) binary.
 
 Options:
   --clean          Run cargo clean before building
   --release        Build with the release profile (default)
-  --dev            Build with the dev profile (appends -dev to binary names)
+  --dev            Build with the dev profile (appends -dev to binary name)
   --arch ARCH      Target architecture: x86_64 or aarch64 (default: host arch)
   -h, --help       Show this help message
 EOF
@@ -94,10 +94,24 @@ PROFILE_DIR="release"
 
 echo -e "${YELLOW}Profile: $MODE | Arch: $ARCH | Target: $TARGET${NC}"
 
-echo -e "${GREEN}Building...${NC}"
-cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target "$TARGET" --profile "$MODE"
+CARGO_EXTRA_ARGS=()
+LOCAL_TOGEMATCH="$(cd "$ROOT_DIR/.." && pwd)/togematch"
+LOCK_BACKUP=""
+if [ "$MODE" = "dev" ] && [ -f "$LOCAL_TOGEMATCH/Cargo.toml" ]; then
+    echo -e "${YELLOW}Using local togematch: $LOCAL_TOGEMATCH${NC}"
+    CARGO_EXTRA_ARGS+=(--config "patch.crates-io.togematch.path=\"$LOCAL_TOGEMATCH\"")
+    # Preserve Cargo.lock so local dev patches never dirty the lockfile.
+    LOCK_BACKUP="$(mktemp)"
+    cp "$ROOT_DIR/Cargo.lock" "$LOCK_BACKUP"
+    trap 'if [ -n "$LOCK_BACKUP" ] && [ -f "$LOCK_BACKUP" ]; then mv -f "$LOCK_BACKUP" "$ROOT_DIR/Cargo.lock"; fi' EXIT
+    # Pick up local version bumps (e.g. 0.1.0 -> 0.1.1) so Cargo does not skip the patch.
+    cargo update --manifest-path "$ROOT_DIR/Cargo.toml" --offline "${CARGO_EXTRA_ARGS[@]}" -p togematch
+fi
 
-# Naming: togewire[-dev][-aarch64], togedemon[-dev][-aarch64]
+echo -e "${GREEN}Building...${NC}"
+cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --target "$TARGET" --profile "$MODE" "${CARGO_EXTRA_ARGS[@]}"
+
+# Naming: togewire[-dev][-aarch64]
 DEV_SUFFIX=""
 ARCH_SUFFIX=""
 [ "$MODE" = "dev" ] && DEV_SUFFIX="-dev"
@@ -105,13 +119,11 @@ ARCH_SUFFIX=""
 
 BUILD_DIR="$ROOT_DIR/target/$TARGET/$PROFILE_DIR"
 
-for BIN in togewire togedemon; do
-    DEST="$ROOT_DIR/${BIN}${DEV_SUFFIX}${ARCH_SUFFIX}"
-    # Copy then rename, so a running binary is replaced rather than overwritten.
-    cp "$BUILD_DIR/$BIN" "$DEST.tmp"
-    mv -f "$DEST.tmp" "$DEST"
-    echo -e "${GREEN}${BIN}:${NC}"
-    ls -lh "$DEST"
-done
+DEST="$ROOT_DIR/togewire${DEV_SUFFIX}${ARCH_SUFFIX}"
+# Copy then rename, so a running binary is replaced rather than overwritten.
+cp "$BUILD_DIR/togewire" "$DEST.tmp"
+mv -f "$DEST.tmp" "$DEST"
+echo -e "${GREEN}togewire:${NC}"
+ls -lh "$DEST"
 
 echo -e "${GREEN}Done!${NC}"

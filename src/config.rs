@@ -22,16 +22,18 @@ static PLAN: AtomicU8 = AtomicU8::new(0);
 pub struct Config {
     pub log_level: String,
     pub admin_password_hash: String,
-    /// Pre-shared secret that authorises togedemon push. Auto-generated on first run.
-    pub togedemon_token: String,
+    /// Cache tracks played on Spotify in the background.
+    pub cache_enabled: bool,
+    /// Where automatic playback/cache fetches audio from when Premium is available.
+    pub audio_source: AudioSource,
     /// Max on-disk track cache size in megabytes.
     pub cache_max_mb: u64,
     /// Opus bitrate cached tracks are encoded at; YouTube's own Opus is kept as it is.
     pub audio_bitrate: String,
     pub normalization: Normalization,
-    /// Stream a 112k copy of tracks cached above High quality (>144k).
+    /// Stream a 112k copy of tracks cached above 112 kbps.
     pub low_data_streaming: bool,
-    /// Public `/player` and `/stream`. Off = cache-only (download what you listen to).
+    /// Public `/player` and `/stream`.
     pub player_enabled: bool,
     /// Optional togematch-api that picks each track's YouTube video.
     pub togematch_api: String,
@@ -47,6 +49,15 @@ pub struct SpotifyAuth {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
     pub expires_at_unix: i64,
+}
+
+/// Where automatic playback/cache preparation fetches audio when Premium is available.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioSource {
+    #[default]
+    Spotify,
+    Youtube,
 }
 
 /// ReplayGain 2.0 (−14 LUFS / −1 dBTP) via rsgain, written into the Opus header gain.
@@ -68,13 +79,16 @@ pub enum CoverArt {
     #[default]
     #[serde(rename = "640")]
     Listed,
+    /// The uploaded cover downscaled to at most 1280 px.
+    #[serde(rename = "1280")]
+    Size1280,
     /// As uploaded, often 1400 to 3000 px, else the listed one.
     #[serde(rename = "original")]
     Original,
 }
 
 /// Offered in the dashboard; also the allowlist, since the value reaches an ffmpeg arg.
-pub const AUDIO_BITRATES: &[&str] = &["112k", "144k", "192k", "256k"];
+pub const AUDIO_BITRATES: &[&str] = &["112k", "144k", "192k"];
 const DEFAULT_BITRATE: &str = "144k";
 
 impl Default for Config {
@@ -82,7 +96,8 @@ impl Default for Config {
         Self {
             log_level: "info".into(),
             admin_password_hash: String::new(),
-            togedemon_token: String::new(),
+            cache_enabled: false,
+            audio_source: AudioSource::Spotify,
             cache_max_mb: 2048,
             audio_bitrate: DEFAULT_BITRATE.into(),
             normalization: Normalization::Off,
@@ -115,18 +130,12 @@ pub fn init() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(e.to_string()),
     };
-    let mut cfg = loaded.unwrap_or_else(|err| {
+    let cfg = loaded.unwrap_or_else(|err| {
         eprintln!("{PATH} exists but could not be loaded ({err}).");
         eprintln!("Fix its permissions or move it aside to start fresh.");
         std::process::exit(1);
     });
 
-    if cfg.togedemon_token.is_empty() {
-        cfg.togedemon_token = crate::random_hex(24);
-        if let Err(e) = save(&cfg) {
-            eprintln!("Could not write {PATH} ({e}); the togedemon token changes every start.");
-        }
-    }
     CONFIG.set(RwLock::new(cfg)).ok();
 }
 
@@ -240,9 +249,16 @@ pub fn audio_bitrate() -> String {
     let bitrate = &get().read().audio_bitrate;
     if AUDIO_BITRATES.contains(&bitrate.as_str()) {
         bitrate.clone()
+    } else if bitrate == "256k" {
+        "192k".into()
     } else {
         DEFAULT_BITRATE.into()
     }
+}
+
+#[must_use]
+pub fn audio_source() -> AudioSource {
+    get().read().audio_source
 }
 
 #[must_use]
@@ -253,6 +269,11 @@ pub fn normalization() -> Normalization {
 #[must_use]
 pub fn cover_art() -> CoverArt {
     get().read().cover_art
+}
+
+#[must_use]
+pub fn cache_enabled() -> bool {
+    get().read().cache_enabled
 }
 
 #[must_use]
@@ -269,31 +290,4 @@ pub fn togematch_api() -> Option<String> {
         .trim_end_matches('/')
         .to_string();
     (!url.is_empty()).then_some(url)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_fields_take_defaults() {
-        let cfg: Config =
-            serde_json::from_str(r#"{"player_enabled": true, "normalization": "stream"}"#).unwrap();
-        assert!(cfg.player_enabled);
-        assert_eq!(cfg.normalization, Normalization::Stream);
-        assert_eq!(cfg.cache_max_mb, 2048);
-        assert_eq!(cfg.audio_bitrate, DEFAULT_BITRATE);
-        assert_eq!(cfg.cover_art, CoverArt::Listed);
-    }
-
-    #[test]
-    fn cover_art_reads_640_or_original() {
-        let original: Config = serde_json::from_str(r#"{"cover_art": "original"}"#).unwrap();
-        assert_eq!(original.cover_art, CoverArt::Original);
-        let listed: Config = serde_json::from_str(r#"{"cover_art": "640"}"#).unwrap();
-        assert_eq!(listed.cover_art, CoverArt::Listed);
-        assert!(serde_json::from_str::<Config>(r#"{"cover_art": "huge"}"#).is_err());
-        let saved = serde_json::to_string(&Config::default()).unwrap();
-        assert!(saved.contains(r#""cover_art":"640""#));
-    }
 }

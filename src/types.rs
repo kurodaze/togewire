@@ -18,6 +18,9 @@ pub struct Track {
     pub track_number: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disc_number: Option<i32>,
+    /// Alternative/relinked Spotify track IDs (e.g. Connect `original_uri` or spclient `alternative`).
+    #[serde(skip)]
+    pub alt_ids: Vec<String>,
 }
 
 impl Track {
@@ -41,6 +44,11 @@ impl Track {
         self.release_date = self.release_date.take().or(other.release_date);
         self.track_number = self.track_number.or(other.track_number);
         self.disc_number = self.disc_number.or(other.disc_number);
+        for alt in other.alt_ids {
+            if !alt.is_empty() && alt != self.id && !self.alt_ids.contains(&alt) {
+                self.alt_ids.push(alt);
+            }
+        }
     }
 
     /// Year part of `release_date`, what cached files are tagged with.

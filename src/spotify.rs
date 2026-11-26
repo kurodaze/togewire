@@ -13,7 +13,8 @@ use crate::types::{SpotifyState, Track};
 
 pub mod parsing;
 pub(crate) use parsing::{
-    ConnectStateSnapshot, parse_connect_state_snapshot, parse_metadata_track, track_id_from_uri,
+    ConnectStateSnapshot, parse_connect_state_snapshot, parse_embed_html, parse_metadata_album,
+    parse_metadata_track, parse_playlist_v2, parse_search_track_uris, track_id_from_uri,
 };
 
 pub const SPOTIFY_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
@@ -123,7 +124,7 @@ impl SpotifyClient {
             bail!("Spotify not authenticated. Pair Togewire via spotify.com/pair.")
         };
         let now = crate::now_unix();
-        let (token, expires_in) = if now < auth.expires_at_unix - 60 {
+        let (token, expires_in) = if now < auth.expires_at_unix.saturating_sub(60) {
             (auth.access_token, (auth.expires_at_unix - now) as u64)
         } else {
             let refresh = auth
@@ -470,9 +471,10 @@ impl SpotifyClient {
         let resolved = async {
             let resp = crate::http().get(APRESOLVE_URL).send().await.ok()?;
             let body: ApresolveResponse = resp.error_for_status().ok()?.json().await.ok()?;
-            body.spclient
-                .into_iter()
-                .find(|host| !host.trim().is_empty())
+            body.spclient.into_iter().find_map(|host| {
+                let h = host.trim();
+                (!h.is_empty()).then(|| h.to_owned())
+            })
         };
         let host = resolved
             .await
@@ -480,6 +482,276 @@ impl SpotifyClient {
         let expires = Instant::now() + Duration::from_secs(SPCLIENT_CACHE_SECS);
         *self.inner.spclient_host_cache.lock().await = Some((host.clone(), expires));
         host
+    }
+
+    /// Resolve a Spotify track by ID: spclient when paired, else Spotify's public embed page.
+    pub async fn resolve_track(&self, id: &str) -> Result<Track> {
+        let uri = format!("spotify:track:{id}");
+        if config::get().read().is_authenticated()
+            && let Some(track) = self.fetch_track_metadata(&uri).await
+        {
+            return Ok(track);
+        }
+        let (_, mut tracks) = self.fetch_embed("track", id).await?;
+        let Some(track) = tracks.pop() else {
+            bail!("Spotify track not found");
+        };
+        Ok(track)
+    }
+
+    /// Resolve a Spotify album by ID into `(album_title, tracks)`, capped at `max_tracks`.
+    pub async fn resolve_album(&self, id: &str, max_tracks: usize) -> Result<(String, Vec<Track>)> {
+        if config::get().read().is_authenticated()
+            && let Ok(album) = self.fetch_album_from_spclient(id).await
+        {
+            let mut tracks = Vec::with_capacity(album.tracks.len().min(max_tracks));
+            for (track_id, fallback) in album.tracks.into_iter().take(max_tracks) {
+                let uri = format!("spotify:track:{track_id}");
+                let track = Self::build_track_from_uri(
+                    &uri,
+                    self.fetch_track_metadata(&uri).await.as_ref(),
+                    Some(&fallback),
+                    None,
+                );
+                tracks.push(track);
+            }
+            if !tracks.is_empty() {
+                return Ok((album.name, tracks));
+            }
+        }
+        let (title, mut tracks) = self.fetch_embed("album", id).await?;
+        tracks.truncate(max_tracks);
+        self.enrich_embed_tracks(&mut tracks).await;
+        Ok((title, tracks))
+    }
+
+    /// Resolve a Spotify playlist by ID into `(playlist_title, tracks)`, capped at `max_tracks`.
+    pub async fn resolve_playlist(
+        &self,
+        id: &str,
+        max_tracks: usize,
+    ) -> Result<(String, Vec<Track>)> {
+        if config::get().read().is_authenticated()
+            && let Ok((name, track_ids)) = self.fetch_playlist_from_spclient(id).await
+        {
+            let mut tracks = Vec::with_capacity(track_ids.len().min(max_tracks));
+            for track_id in track_ids.into_iter().take(max_tracks) {
+                if let Ok(track) = self.resolve_track(&track_id).await {
+                    tracks.push(track);
+                }
+            }
+            if !tracks.is_empty() {
+                return Ok((name, tracks));
+            }
+        }
+        let (title, mut tracks) = self.fetch_embed("playlist", id).await?;
+        tracks.truncate(max_tracks);
+        self.enrich_embed_tracks(&mut tracks).await;
+        Ok((title, tracks))
+    }
+
+    async fn enrich_embed_tracks(&self, tracks: &mut [Track]) {
+        if !config::get().read().is_authenticated() {
+            return;
+        }
+        for track in tracks {
+            let uri = format!("spotify:track:{}", track.id);
+            if let Some(mut full) = self.fetch_track_metadata(&uri).await {
+                full.fill_from(track.clone());
+                *track = full;
+            }
+        }
+    }
+
+    async fn fetch_album_from_spclient(&self, id: &str) -> Result<parsing::AlbumMetadata> {
+        let gid = librespot_core::SpotifyId::from_base62(id)?.to_base16()?;
+        let host = self.resolve_spclient_host().await;
+        let payload = self
+            .send_authed_json("album metadata", |http| {
+                http.get(format!("https://{host}/metadata/4/album/{gid}"))
+                    .query(&[("market", "from_token")])
+                    .header("Accept-Language", "en")
+            })
+            .await?;
+        parse_metadata_album(&payload)
+            .ok_or_else(|| anyhow::anyhow!("Spotify album metadata had no tracks"))
+    }
+
+    async fn fetch_playlist_from_spclient(&self, id: &str) -> Result<(String, Vec<String>)> {
+        let host = self.resolve_spclient_host().await;
+        if let Ok(payload) = self
+            .send_authed_json("playlist", |http| {
+                http.get(format!("https://{host}/playlist/v2/playlist/{id}"))
+            })
+            .await
+            && let Some(res) = parse_playlist_v2(&payload)
+        {
+            return Ok(res);
+        }
+        let payload = self
+            .send_authed_json("playlist context", |http| {
+                http.get(format!(
+                    "https://{host}/context-resolve/v1/spotify:playlist:{id}"
+                ))
+            })
+            .await?;
+        parse_playlist_v2(&payload).ok_or_else(|| anyhow::anyhow!("Spotify playlist had no tracks"))
+    }
+
+    /// Top Spotify tracks for a search query via `spclient` (works on Free and Premium accounts).
+    pub async fn search_tracks(&self, query: &str) -> Vec<Track> {
+        const SEARCH_RESULTS: usize = 5;
+        let query = query.trim();
+        if query.is_empty() || !config::get().read().is_authenticated() {
+            return Vec::new();
+        }
+        let encoded = encode_search_component(query);
+        let host = self.resolve_spclient_host().await;
+        let url = format!("https://{host}/context-resolve/v1/spotify:search:{encoded}");
+        let Ok(payload) = self.send_authed_json("search", |http| http.get(&url)).await else {
+            return Vec::new();
+        };
+        let uris = parse_search_track_uris(&payload);
+        let mut tracks = Vec::new();
+        for uri in uris.into_iter().take(SEARCH_RESULTS) {
+            if let Some(track) = self.fetch_track_metadata(&uri).await {
+                tracks.push(track);
+            }
+        }
+        tracks
+    }
+
+    /// Find the Spotify track matching a YouTube video candidate for metadata and cover art.
+    pub async fn match_youtube_track(
+        &self,
+        queries: &[String],
+        candidate: &togematch::Candidate,
+    ) -> Option<Track> {
+        if !config::get().read().is_authenticated() {
+            return None;
+        }
+        for query in queries {
+            let found = self.search_tracks(query).await;
+            if found.is_empty() {
+                continue;
+            }
+            let wanted_list: Vec<togematch::Track> = found
+                .iter()
+                .map(|t| togematch::Track {
+                    name: t.name.clone(),
+                    artist: t.artist.clone(),
+                    album: t.album.clone(),
+                    duration: t.duration,
+                    explicit: t.explicit,
+                })
+                .collect();
+            if let Some((idx, _)) = wanted_list
+                .iter()
+                .enumerate()
+                .filter_map(|(i, w)| Some((i, togematch::score(w, candidate)?)))
+                .max_by_key(|&(_, score)| score)
+            {
+                return Some(found[idx].clone());
+            }
+            // Validate searched-fit against the unstripped primary query so bracket-stripped
+            // fallback queries cannot drop remix/bootleg qualifiers.
+            let check_query = queries.first().map_or(query.as_str(), String::as_str);
+            if let Some((idx, _)) = togematch::searched(check_query, &wanted_list)
+                .into_iter()
+                .find(|&(i, ref fit)| {
+                    let sp = &wanted_list[i];
+                    let dur_ok = sp.duration <= 0
+                        || candidate.duration <= 0
+                        || (sp.duration - candidate.duration).abs() <= 15_000;
+                    fit.unconfirmed.is_empty() && dur_ok
+                })
+            {
+                return Some(found[idx].clone());
+            }
+        }
+        None
+    }
+
+    async fn fetch_embed(&self, kind: &str, id: &str) -> Result<(String, Vec<Track>)> {
+        let url = format!("https://open.spotify.com/embed/{kind}/{id}");
+        if let Ok(resp) = crate::http()
+            .get(&url)
+            .header("Accept-Language", "en")
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            && let Ok(html) = resp.text().await
+            && let Some(parsed) = parse_embed_html(&html, id)
+        {
+            return Ok(parsed);
+        }
+        if let Some(base) = config::togematch_api()
+            && let Ok(resp) = crate::http()
+                .get(format!("{base}/match"))
+                .query(&[("q", format!("spotify:{kind}:{id}"))])
+                .timeout(Duration::from_secs(30))
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            && let Ok(body) = resp.json::<Value>().await
+            && let Some(arr) = body.get("tracks").and_then(Value::as_array)
+        {
+            let playlist_title = body
+                .get("playlist")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned);
+            let is_album = kind == "album";
+            let tracks: Vec<Track> = arr
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, item)| {
+                    let name = item.get("title")?.as_str()?.trim().to_string();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let artist = item
+                        .get("artist")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("Unknown Artist")
+                        .to_string();
+                    let duration = item.get("duration").and_then(Value::as_i64).unwrap_or(0);
+                    let track_id = item
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .map(track_id_from_uri)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| {
+                            if kind == "track" {
+                                id.to_string()
+                            } else {
+                                String::new()
+                            }
+                        });
+                    Some(Track {
+                        id: track_id,
+                        name,
+                        artist,
+                        album: if is_album {
+                            playlist_title.clone().unwrap_or_default()
+                        } else {
+                            String::new()
+                        },
+                        duration: duration.max(0),
+                        track_number: is_album.then_some((idx + 1) as i32),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            if !tracks.is_empty() {
+                let title = playlist_title.unwrap_or_else(|| tracks[0].name.clone());
+                return Ok((title, tracks));
+            }
+        }
+        bail!("Could not read Spotify {kind} metadata")
     }
 
     /// Cached metadata for one track URI.
@@ -547,4 +819,21 @@ fn plan_is_premium(state: &serde_json::Value) -> bool {
     let field = |k: &str| state.get(k).and_then(serde_json::Value::as_str);
     field("product").is_some_and(|p| p.eq_ignore_ascii_case("premium"))
         && field("type").is_none_or(|t| t == "premium")
+}
+
+fn encode_search_component(text: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(b));
+            }
+            b' ' => out.push('+'),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
 }

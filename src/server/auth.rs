@@ -2,8 +2,10 @@ use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
+use tokio::sync::Semaphore;
 
 /// Browsers cap cookie lifetime at 400 days.
 const COOKIE_MAX_AGE_SECS: u64 = 400 * 86_400;
@@ -11,14 +13,19 @@ const MAX_LOGIN_ATTEMPTS: usize = 5;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_mins(30);
 /// Caps the map so a flood of logins cannot grow it without bound.
 const MAX_ENTRIES: usize = 1_000;
+/// Cap total failed setup-token guesses across all IPs so rotating IPs cannot brute-force it.
+const MAX_GLOBAL_SETUP_FAILURES: usize = 20;
 
 pub const SESSION_COOKIE: &str = "togewire_session";
 
 /// Client IP → (attempts, window start).
 static ATTEMPTS: LazyLock<Mutex<HashMap<String, (usize, Instant)>>> = LazyLock::new(Mutex::default);
 static SETUP_TOKEN: Mutex<String> = Mutex::new(String::new());
+static SETUP_FAILURES: AtomicUsize = AtomicUsize::new(0);
 /// Hash of the setup password awaiting its confirm step, so the page never echoes it back.
 static PENDING_HASH: Mutex<String> = Mutex::new(String::new());
+/// Bounds concurrent bcrypt verifications so distributed login floods cannot peg all CPU cores.
+static BCRYPT_LIMIT: Semaphore = Semaphore::const_new(2);
 
 /// Drop expired entries, then the oldest, until one insert fits under `MAX_ENTRIES`.
 fn make_room(map: &mut HashMap<String, (usize, Instant)>) {
@@ -58,6 +65,9 @@ pub async fn verify_password(hash: String, password: String) -> bool {
     if password.len() > 72 {
         return false;
     }
+    let Ok(_permit) = BCRYPT_LIMIT.acquire().await else {
+        return false;
+    };
     tokio::task::spawn_blocking(move || bcrypt::verify(password, &hash).unwrap_or(false))
         .await
         .unwrap_or(false)
@@ -94,28 +104,42 @@ pub fn session_cookie(secure: bool, token: &str) -> String {
 
 #[must_use]
 pub fn generate_setup_token() -> String {
-    use rand::RngExt;
     // 32 symbols, so `byte % 32` has no modulo bias.
     const CHARS: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut bytes = [0u8; 8];
-    rand::rng().fill(&mut bytes[..]);
+    getrandom::fill(&mut bytes).expect("OS RNG");
     let token: String = bytes
         .iter()
         .map(|b| CHARS[*b as usize % CHARS.len()] as char)
         .collect();
     *SETUP_TOKEN.lock() = token.clone();
+    SETUP_FAILURES.store(0, Ordering::Relaxed);
     token
 }
 
 #[must_use]
 pub fn is_setup_token_valid(token: &str) -> bool {
-    let stored = SETUP_TOKEN.lock();
-    !stored.is_empty() && bool::from(stored.as_bytes().ct_eq(token.as_bytes()))
+    let mut stored = SETUP_TOKEN.lock();
+    if stored.is_empty() {
+        return false;
+    }
+    if bool::from(stored.as_bytes().ct_eq(token.as_bytes())) {
+        return true;
+    }
+    if SETUP_FAILURES.fetch_add(1, Ordering::Relaxed) + 1 >= MAX_GLOBAL_SETUP_FAILURES {
+        stored.clear();
+        PENDING_HASH.lock().clear();
+        tracing::warn!(
+            "Setup token invalidated after {MAX_GLOBAL_SETUP_FAILURES} failed attempts; restart to generate a new one"
+        );
+    }
+    false
 }
 
 pub fn clear_setup_token() {
     SETUP_TOKEN.lock().clear();
     PENDING_HASH.lock().clear();
+    SETUP_FAILURES.store(0, Ordering::Relaxed);
 }
 
 pub fn set_pending_hash(hash: String) {
@@ -144,5 +168,12 @@ mod tests {
         assert!(!register_login_attempt(ip));
         clear_failed_attempts(ip);
         assert!(register_login_attempt(ip));
+
+        let setup = generate_setup_token();
+        assert!(is_setup_token_valid(&setup));
+        for _ in 0..MAX_GLOBAL_SETUP_FAILURES {
+            assert!(!is_setup_token_valid("WRONGGSS"));
+        }
+        assert!(!is_setup_token_valid(&setup));
     }
 }

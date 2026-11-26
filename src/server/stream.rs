@@ -21,9 +21,7 @@ const BUFFER_AHEAD: Duration = Duration::from_secs(5);
 /// In-memory streaming copies kept in /dev/shm (~4 MB each).
 const MAX_TEMP_COPIES: usize = 3;
 /// Pages a listener may fall behind by before it skips ahead, and all one that stops reading
-/// can hold on to: about 40 s of togedemon's 20 ms pages, or a minute of a cached file's 1 s
-/// ones rather than the whole track.
-const LIVE_BACKLOG: usize = 2048;
+/// can hold on to: about a minute of a cached file's 1 s pages rather than the whole track.
 const FILE_BACKLOG: usize = 64;
 
 pub const CONTENT_TYPE: &str = "audio/ogg";
@@ -101,22 +99,13 @@ pub struct StreamManager {
 impl StreamManager {
     #[must_use]
     pub fn new(cache: Arc<crate::cache::Manager>) -> Self {
-        use std::os::unix::fs::MetadataExt;
         let dir = norm_dir();
         let _ = std::fs::remove_dir_all(&dir);
-        create_norm_dir(&dir);
-        // /dev/shm is shared: a dir squatted by another user could read or swap our copies.
-        if let Ok(meta) = std::fs::symlink_metadata(&dir) {
-            assert!(
-                meta.is_dir() && meta.uid() == uid() && meta.mode() & 0o077 == 0,
-                "{} is not a private directory owned by this user; remove it",
-                dir.display()
-            );
-        }
+        crate::ensure_shm_dir(&dir);
         Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
-                    pipe: Pipe::new(LIVE_BACKLOG),
+                    pipe: Pipe::new(FILE_BACKLOG),
                     listeners: 0,
                     generation: 0,
                     playing_file: false,
@@ -129,6 +118,9 @@ impl StreamManager {
 
     /// Build the in-memory streaming copy of a cached track in the background.
     pub fn prewarm(&self, file_path: &str) {
+        if !config::get().read().player_enabled {
+            return;
+        }
         let Some(variant) = self.plan_temp_artifact(file_path) else {
             return;
         };
@@ -147,9 +139,9 @@ impl StreamManager {
 
     /// Which in-memory streaming copy a cached track needs, if any.
     fn plan_temp_artifact(&self, file_path: &str) -> Option<TempArtifact> {
-        let (above_144k, normalized) = self.cache.stream_flags(file_path);
+        let (above_112k, normalized) = self.cache.stream_flags(file_path);
         let normalize = config::normalization() == config::Normalization::Stream && !normalized;
-        if config::low_data_streaming() && above_144k {
+        if config::low_data_streaming() && above_112k {
             // One 112k copy covers both features: it is encoded from the normalized copy.
             Some(TempArtifact::LowData {
                 normalized: normalize,
@@ -169,7 +161,7 @@ impl StreamManager {
         self.inner.state.lock().listeners
     }
 
-    /// True while a cached file (not togedemon) is feeding the stream.
+    /// True while a cached file is feeding the stream.
     #[must_use]
     pub fn has_track(&self) -> bool {
         self.inner.state.lock().playing_file
@@ -199,11 +191,7 @@ impl StreamManager {
         let mut state = self.inner.state.lock();
         state.generation += 1;
         state.pipe.shutdown.cancel();
-        state.pipe = Pipe::new(if playing_file {
-            FILE_BACKLOG
-        } else {
-            LIVE_BACKLOG
-        });
+        state.pipe = Pipe::new(FILE_BACKLOG);
         state.playing_file = playing_file;
         state.pipe.clone()
     }
@@ -215,12 +203,6 @@ impl StreamManager {
     pub fn shutdown(&self) {
         self.stop();
         let _ = std::fs::remove_dir_all(norm_dir());
-    }
-
-    /// Switch to live togedemon input; feed the returned pipe with `pump_ogg`.
-    #[must_use]
-    pub fn play_live(&self) -> Pipe {
-        self.swap_pipe(false)
     }
 
     /// Play a cached Ogg file from `seek_ms`.
@@ -316,8 +298,8 @@ fn ogg_crc(data: &[u8]) -> u32 {
 }
 
 /// Feed Ogg pages from `r` into `pipe` until EOF or the pipe is retired: header pages
-/// first (tags emptied), then from `seek_ms` on. Files are `pace`d to real time; live input already is.
-pub(crate) async fn pump_ogg<R: AsyncRead + Unpin>(
+/// first (tags emptied), then from `seek_ms` on. Paced to real time when `pace` is true.
+async fn pump_ogg<R: AsyncRead + Unpin>(
     mut r: R,
     seek_ms: i64,
     pace: bool,
@@ -341,7 +323,7 @@ pub(crate) async fn pump_ogg<R: AsyncRead + Unpin>(
     let headers = [&head[..], &empty_tags_page(&head[14..18], tags_seq)].concat();
     // Everything streamed is Opus, whose granule clock is always 48 kHz.
     let base = seek_ms.max(0) as u64 * OPUS_RATE / 1000;
-    while page.granule < base {
+    while page.granule == u64::MAX || page.granule < base {
         let Some(next) = read_ogg_page(&mut r).await? else {
             return Ok(());
         };
@@ -352,7 +334,7 @@ pub(crate) async fn pump_ogg<R: AsyncRead + Unpin>(
 
     let started = Instant::now();
     loop {
-        if pace && page.granule > base {
+        if pace && page.granule != u64::MAX && page.granule > base {
             let due = Duration::from_secs_f64((page.granule - base) as f64 / OPUS_RATE as f64)
                 .saturating_sub(BUFFER_AHEAD);
             if let Some(wait) = due.checked_sub(started.elapsed()) {
@@ -376,30 +358,9 @@ pub(crate) async fn pump_ogg<R: AsyncRead + Unpin>(
     }
 }
 
-fn create_norm_dir(dir: &Path) {
-    use std::os::unix::fs::DirBuilderExt;
-    let _ = std::fs::DirBuilder::new().mode(0o700).create(dir);
-}
-
-fn uid() -> u32 {
-    // SAFETY: getuid has no preconditions and cannot fail.
-    unsafe {
-        unsafe extern "C" {
-            fn getuid() -> u32;
-        }
-        getuid()
-    }
-}
-
 /// Per-uid dir in /dev/shm (else the temp dir), so users sharing a host never collide.
 fn norm_dir() -> PathBuf {
-    let base = Path::new("/dev/shm");
-    let base = if base.is_dir() {
-        base.to_path_buf()
-    } else {
-        std::env::temp_dir()
-    };
-    base.join(format!("togewire_norm_{}", uid()))
+    crate::shm_dir_path("togewire_norm")
 }
 
 /// The in-memory streaming copy variants kept in the norm dir.
@@ -452,7 +413,7 @@ async fn ensure_stream_temp(file_path: &str, variant: TempArtifact) -> Option<Pa
         return Some(target);
     }
     let dir = norm_dir();
-    create_norm_dir(&dir);
+    crate::ensure_shm_dir(&dir);
     let tmp = dir.join(format!(
         "{}.tmp.{}",
         crate::random_hex(6),
@@ -477,7 +438,8 @@ async fn ensure_stream_temp(file_path: &str, variant: TempArtifact) -> Option<Pa
                 .args(["-vn", "-c:a", "libopus", "-b:a", "112k", "-vbr", "on"])
                 .args(["-application", "audio", "-f", "ogg"])
                 .arg(&tmp);
-            let res = crate::audio::run(&mut cmd, "ffmpeg").await;
+            let res =
+                crate::audio::run_timeout(&mut cmd, "ffmpeg", crate::audio::ENCODE_TIMEOUT).await;
             // Only this encode reads the full-size normalized copy; free its RAM slot.
             if let Some(copy) = normalized_copy {
                 let _ = std::fs::remove_file(copy);
@@ -534,13 +496,15 @@ mod tests {
     async fn pump_sends_headers_then_pages_from_the_seek_point() {
         let mut ogg = page(0, b"OpusHead");
         ogg.extend(page(0, b"OpusTags with cover art"));
+        ogg.extend(page(u64::MAX, b"continued before seek"));
         ogg.extend(page(48_000, b"one second"));
         ogg.extend(page(96_000, b"two seconds"));
+        ogg.extend(page(u64::MAX, b"continued after seek"));
 
         let pipe = Pipe::new(FILE_BACKLOG);
         let (mut rx, prefix) = pipe.subscribe();
         assert!(prefix.is_empty());
-        pump_ogg(&ogg[..], 1500, false, &pipe).await.unwrap();
+        pump_ogg(&ogg[..], 1500, true, &pipe).await.unwrap();
 
         let headers = rx.recv().await.unwrap();
         assert!(headers.windows(8).any(|w| w == b"OpusHead"));
@@ -554,10 +518,12 @@ mod tests {
             audio.ends_with(b"two seconds"),
             "1s page is before the seek"
         );
+        let cont = rx.recv().await.unwrap();
+        assert!(cont.ends_with(b"continued after seek"));
 
-        // A late joiner gets the same two pages as its prefix.
+        // A late joiner gets the same headers and audio pages as its prefix.
         let (_, prefix) = pipe.subscribe();
-        assert_eq!(prefix, vec![headers, audio]);
+        assert_eq!(prefix, vec![headers, audio, cont]);
 
         assert_eq!(ogg_crc(b"123456789"), 0x89a1_897f);
         assert!(

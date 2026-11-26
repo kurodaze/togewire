@@ -2,7 +2,7 @@ use axum::extract::ws::Utf8Bytes;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-use super::{AppState, TogedemonEvent};
+use super::AppState;
 use crate::audio::PrepareError;
 use crate::config;
 use crate::types::{SpotifyState, Track, TrackUpdateMessage, WsMessage};
@@ -42,9 +42,18 @@ pub async fn spotify_monitor_worker(state: AppState) {
 
     while !state.shutdown.is_cancelled() {
         let poll_start = Instant::now();
-        // Unpaired or just disconnected reads as nothing playing, so a re-pair is picked
-        // up on the next idle poll rather than after an error backoff.
-        let s = if !config::get().read().is_authenticated() {
+        let (authenticated, player_enabled, cache_enabled) = {
+            let cfg = config::get().read();
+            (
+                cfg.is_authenticated(),
+                cfg.player_enabled,
+                cfg.cache_enabled,
+            )
+        };
+        // Unpaired, or both player and background caching off, reads as nothing playing so
+        // Spotify is not polled unnecessarily and turning either on resumes on the next tick.
+        let s = if !authenticated || (!player_enabled && !cache_enabled) {
+            consecutive_errors = 0;
             SpotifyState::default()
         } else {
             match state.spotify_client.get_current_track().await {
@@ -69,9 +78,7 @@ pub async fn spotify_monitor_worker(state: AppState) {
         let Some(track) = s.track.clone() else {
             *state.current.write() = None;
             if last_track_id.take().is_some() {
-                if !state.togedemon_live() {
-                    state.stream_manager.stop();
-                }
+                state.stream_manager.stop();
                 broadcast_track_update(&state, &s);
                 last_playing = false;
             }
@@ -119,7 +126,7 @@ pub async fn spotify_monitor_worker(state: AppState) {
                     if let Some(path) = &cached {
                         maybe_play(&state, path, &s);
                     }
-                } else if !state.togedemon_live() {
+                } else {
                     state.stream_manager.stop();
                 }
                 changed = true;
@@ -165,9 +172,9 @@ pub async fn spotify_monitor_worker(state: AppState) {
     }
 }
 
-/// Play a cached file if one should be streaming now (playing, player on, no togedemon).
+/// Play a cached file if one should be streaming now (playing and player on).
 fn maybe_play(state: &AppState, path: &str, s: &SpotifyState) -> bool {
-    let play = s.is_playing && !state.togedemon_live() && config::get().read().player_enabled;
+    let play = s.is_playing && config::get().read().player_enabled;
     if play {
         state
             .stream_manager
@@ -179,7 +186,7 @@ fn maybe_play(state: &AppState, path: &str, s: &SpotifyState) -> bool {
 /// Point the stream at a new current track: its cached file, or quiet until prepared.
 pub(crate) fn switch_track(state: &AppState, s: &SpotifyState, track: &Track) {
     let played = (state.preparer.get_cached_path(track)).is_some_and(|p| maybe_play(state, &p, s));
-    if !played && !state.togedemon_live() {
+    if !played {
         state.stream_manager.stop();
     }
     broadcast_track_update(state, s);
@@ -200,7 +207,7 @@ pub(crate) fn start_stream_if_playing(state: &AppState) {
 fn prepare_current(state: &AppState, track: &Track) {
     let p = &state.preparer;
     if p.get_cached_path(track).is_none() && !p.is_preparing(track) && !p.recently_failed(track) {
-        spawn_prepare(state, track, "Preparing track cache");
+        spawn_prepare(state, track, "Preparing track");
     }
 }
 
@@ -247,7 +254,7 @@ fn spawn_prepare(state: &AppState, track: &Track, what: &str) {
             }
             Err(PrepareError::Busy) => debug!("Already preparing: {name}"),
             Err(PrepareError::NoSource) => warn!("No YouTube source for {name}"),
-            Err(PrepareError::Failed(msg)) => warn!("Caching failed for {name}: {msg}"),
+            Err(PrepareError::Failed(msg)) => warn!("Failed to prepare {name}: {msg}"),
         }
         // `preparing` / `no_source` just changed.
         rebroadcast(&state);
@@ -261,7 +268,7 @@ pub(crate) fn track_update_message(state: &AppState, s: &SpotifyState) -> Utf8By
     let data = TrackUpdateMessage {
         progress: if track.is_some() { s.progress } else { 0 },
         is_playing: track.is_some() && s.is_playing,
-        stream_active: state.togedemon_live() || state.stream_manager.has_track(),
+        stream_active: state.stream_manager.has_track(),
         stream_gen: state.stream_manager.generation(),
         listener_count: state.stream_manager.listener_count(),
         preparing: (track.as_ref()).is_some_and(|t| state.preparer.is_preparing(t)),
@@ -280,7 +287,6 @@ pub fn broadcast_track_update(state: &AppState, s: &SpotifyState) {
     for tx in state.ws_clients.read().values() {
         let _ = tx.try_send(msg.clone());
     }
-    let _ = state.togedemon_events.send(TogedemonEvent::new(Some(s)));
 }
 
 /// Re-send the current state after something besides Spotify changed (listeners, prepare).

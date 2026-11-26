@@ -189,7 +189,9 @@
                 reconnectDelay = 1000;
                 if (listening) sendListening(true);
             };
-            ws.onmessage = e => onMessage(JSON.parse(e.data));
+            ws.onmessage = e => {
+                try { onMessage(JSON.parse(e.data)); } catch (_) { }
+            };
             ws.onclose = () => { el.status.textContent = 'disconnected'; scheduleReconnect(); };
         } catch (_) { scheduleReconnect(); }
     }

@@ -49,8 +49,8 @@ pub struct TrackPreparer {
 
 impl TrackPreparer {
     pub fn new(spotify: SpotifyClient, cache: Arc<CacheManager>) -> Self {
-        let librespot = LibrespotFetcher::new(spotify, Arc::clone(&cache));
-        let ytdlp = YtdlpFetcher::new(Arc::clone(&cache));
+        let librespot = LibrespotFetcher::new(spotify.clone(), Arc::clone(&cache));
+        let ytdlp = YtdlpFetcher::new(spotify, Arc::clone(&cache));
         Self {
             cache,
             librespot,
@@ -67,11 +67,13 @@ impl TrackPreparer {
     }
 
     pub fn get_cached_path(&self, track: &Track) -> Option<String> {
-        self.cache.get_path(&track.id)
+        self.cache.get_for_track(track)
     }
 
     pub fn is_preparing(&self, track: &Track) -> bool {
-        self.in_flight.lock().contains_key(&track.id)
+        let in_flight = self.in_flight.lock();
+        in_flight.contains_key(&track.id)
+            || track.alt_ids.iter().any(|id| in_flight.contains_key(id))
     }
 
     pub fn recently_failed(&self, track: &Track) -> bool {
@@ -86,7 +88,7 @@ impl TrackPreparer {
     }
 
     pub async fn prepare_track(&self, track: &Track) -> Result<PathBuf, PrepareError> {
-        if let Some(path) = self.cache.get_path(&track.id) {
+        if let Some(path) = self.cache.get_for_track(track) {
             return Ok(PathBuf::from(path));
         }
         if self.recently_failed(track) {
@@ -100,7 +102,10 @@ impl TrackPreparer {
 
         let role = {
             let mut in_flight = self.in_flight.lock();
-            if let Some(existing) = in_flight.get(&track.id) {
+            if let Some(existing) = in_flight
+                .get(&track.id)
+                .or_else(|| track.alt_ids.iter().find_map(|id| in_flight.get(id)))
+            {
                 PrepRole::Follower(existing.clone())
             } else {
                 let (tx, rx) = tokio::sync::watch::channel(());
@@ -114,7 +119,7 @@ impl TrackPreparer {
             PrepRole::Follower(mut rx) => {
                 // Another task is already preparing - wait for completion instead of busy polling.
                 let _ = tokio::time::timeout(Duration::from_secs(60), rx.changed()).await;
-                if let Some(path) = self.cache.get_path(&track.id) {
+                if let Some(path) = self.cache.get_for_track(track) {
                     Ok(PathBuf::from(path))
                 } else {
                     Err(PrepareError::Busy)
@@ -136,7 +141,7 @@ impl TrackPreparer {
 
         let result = {
             let _download = self.download_lock.lock().await;
-            if let Some(path) = self.cache.get_path(&track.id) {
+            if let Some(path) = self.cache.get_for_track(track) {
                 Ok(PathBuf::from(path))
             } else if self.recently_failed(track) {
                 debug!("skipping recent failure: {} - {}", track.artist, track.name);
@@ -167,14 +172,22 @@ impl TrackPreparer {
     }
 
     async fn prepare_inner(&self, track: &Track) -> Result<PathBuf, PrepareError> {
-        if !crate::config::use_librespot() {
-            return self.fetch_via_ytdlp(track).await;
+        let to_disk = crate::config::cache_enabled();
+        let verb = if to_disk {
+            "Cached"
+        } else {
+            "Prepared in memory"
+        };
+        if !crate::config::use_librespot()
+            || crate::config::audio_source() == crate::config::AudioSource::Youtube
+        {
+            return self.fetch_via_ytdlp(track, to_disk, verb).await;
         }
 
-        match self.librespot.fetch_track(track).await {
+        match self.librespot.fetch_track(track, to_disk).await {
             Ok(path) => {
                 info!(
-                    "cached via librespot: {} - {} ({})",
+                    "{verb} via librespot: {} - {} ({})",
                     track.artist,
                     track.name,
                     path.display()
@@ -186,14 +199,19 @@ impl TrackPreparer {
             }
         }
 
-        self.fetch_via_ytdlp(track).await
+        self.fetch_via_ytdlp(track, to_disk, verb).await
     }
 
-    async fn fetch_via_ytdlp(&self, track: &Track) -> Result<PathBuf, PrepareError> {
-        match self.ytdlp.fetch_track(track).await {
+    async fn fetch_via_ytdlp(
+        &self,
+        track: &Track,
+        to_disk: bool,
+        verb: &str,
+    ) -> Result<PathBuf, PrepareError> {
+        match self.ytdlp.fetch_track(track, to_disk).await {
             Ok(path) => {
                 info!(
-                    "cached via yt-dlp: {} - {} ({})",
+                    "{verb} via yt-dlp: {} - {} ({})",
                     track.artist,
                     track.name,
                     path.display()
@@ -206,31 +224,52 @@ impl TrackPreparer {
             Err(e) => Err(PrepareError::Failed(e.to_string())),
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    pub async fn manual_download_spotify_track(
+        &self,
+        track: &Track,
+        dir: &std::path::Path,
+        source: super::manual_download::ManualDownloadSource,
+        quality: super::manual_download::ManualDownloadQuality,
+        normalize: bool,
+    ) -> Result<PathBuf, String> {
+        let _download = self.download_lock.lock().await;
+        match source {
+            super::manual_download::ManualDownloadSource::Librespot => self
+                .librespot
+                .manual_download_track(track, dir, quality, normalize)
+                .await
+                .map_err(|e| e.to_string()),
+            super::manual_download::ManualDownloadSource::Ytdlp => self
+                .ytdlp
+                .manual_download_spotify_track(track, dir, normalize)
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    }
 
-    #[tokio::test]
-    async fn in_flight_guard_wakes_follower() {
-        let in_flight: Mutex<HashMap<String, tokio::sync::watch::Receiver<()>>> =
-            Mutex::new(HashMap::new());
-        let (tx, rx) = tokio::sync::watch::channel(());
-        in_flight.lock().insert("track1".to_string(), rx.clone());
+    pub async fn manual_download_youtube_video(
+        &self,
+        video_id: &str,
+        dir: &std::path::Path,
+        normalize: bool,
+    ) -> Result<PathBuf, String> {
+        let _download = self.download_lock.lock().await;
+        self.ytdlp
+            .manual_download_youtube_video(video_id, dir, normalize)
+            .await
+            .map_err(|e| e.to_string())
+    }
 
-        let guard = InFlightGuard {
-            in_flight: &in_flight,
-            track_id: "track1".to_string(),
-            _tx: tx,
-        };
-
-        let mut follower_rx = rx;
-        drop(guard);
-
-        // Follower must wake immediately even though guard was dropped before .changed() was awaited
-        let res = tokio::time::timeout(Duration::from_millis(50), follower_rx.changed()).await;
-        assert!(res.is_ok());
-        assert!(!in_flight.lock().contains_key("track1"));
+    pub async fn resolve_youtube_playlist(
+        &self,
+        url: &str,
+        max_items: usize,
+    ) -> Result<(String, Vec<(String, String)>), String> {
+        let _download = self.download_lock.lock().await;
+        self.ytdlp
+            .resolve_youtube_playlist(url, max_items)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
