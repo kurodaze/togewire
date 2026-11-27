@@ -177,8 +177,11 @@ fn main() {
         _ if cfg!(debug_assertions) => "debug",
         _ => "info",
     };
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(format!("togewire={level},info")));
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(format!("togewire={level},info")))
+        .with_env_filter(filter)
+        .with_target(false)
         .init();
 
     if args.no_librespot {
@@ -190,11 +193,6 @@ fn main() {
             std::process::exit(1);
         }
         audio::ytdlp::set_cli_cookies(Some(path.clone()));
-    }
-    if let Some(path) = audio::ytdlp::cookies_file() {
-        info!("YouTube cookies found at {path} (used when challenged)");
-    } else {
-        debug!("no YouTube cookies found in data/");
     }
     if needs_setup {
         // Printed, not logged: a log_level above info would hide it.
@@ -239,6 +237,11 @@ fn main() {
             "togewire v{} starting on http://{addr}",
             env!("CARGO_PKG_VERSION")
         );
+        if let Some(path) = audio::ytdlp::cookies_file() {
+            info!("YouTube cookies found at {path} (used when challenged)");
+        } else {
+            debug!("no YouTube cookies found in data/");
+        }
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .expect("Failed to bind address")

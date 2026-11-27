@@ -449,7 +449,8 @@ async fn run_download_loop(
             continue;
         }
         if !updated && err.contains(OUTDATED) && update(UPDATE_GAP).await {
-            info!("yt-dlp: trying the download again with its new version");
+            let why = last_ytdlp_error(&err);
+            info!("yt-dlp: trying again with its new version, after: {why}");
             updated = true;
             continue;
         }
@@ -833,12 +834,12 @@ async fn query_togematch_api(base: &str, query: &str) -> Option<serde_json::Valu
         Ok(response) => match response.json().await {
             Ok(body) => Some(body),
             Err(e) => {
-                info!("togematch-api at {base} didn't answer ({e}), searching YouTube");
+                warn!("togematch-api at {base} didn't answer ({e}), searching YouTube");
                 None
             }
         },
         Err(e) => {
-            info!("togematch-api at {base} didn't answer ({e}), searching YouTube");
+            warn!("togematch-api at {base} didn't answer ({e}), searching YouTube");
             None
         }
     }
@@ -1154,12 +1155,21 @@ async fn run_dump_json(
             continue;
         }
         if !updated && err.contains(OUTDATED) && update(UPDATE_GAP).await {
-            info!("yt-dlp: trying the search again with its new version");
+            let why = last_ytdlp_error(&err);
+            info!("yt-dlp: trying again with its new version, after: {why}");
             updated = true;
             continue;
         }
         bail!("yt-dlp search failed: {}", crate::tail_chars(&err, 400));
     }
+}
+
+fn last_ytdlp_error(stderr: &str) -> &str {
+    stderr
+        .lines()
+        .rfind(|l| l.starts_with("ERROR:"))
+        .map(|l| l.trim_start_matches("ERROR: "))
+        .unwrap_or("yt-dlp failed")
 }
 
 fn candidates(stdout: &[u8]) -> Vec<Candidate> {
