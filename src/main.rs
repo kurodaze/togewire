@@ -235,7 +235,10 @@ fn main() {
         });
 
         let addr = format!("{}:{}", args.host, args.port);
-        info!("Server starting on http://{addr}");
+        info!(
+            "togewire v{} starting on http://{addr}",
+            env!("CARGO_PKG_VERSION")
+        );
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .expect("Failed to bind address")
